@@ -129,11 +129,12 @@ export class TokenMeter extends Service {
    * pricing every node is priced under: a route whose adapter declares image
    * pricing charges each retained image its visual tokens plus its
    * model-visible text, while other routes keep the fixed heuristic. Provider
-   * usage is reused only when the latest successful call's canonical request
-   * envelope matches `requestHeader` and its total is no lower than that
-   * call's full route-priced anchor; otherwise the complete envelope and
-   * surface are repriced. The anchor includes all surface nodes immediately
-   * before the assistant message, including inputs admitted after step/start.
+   * usage is reused whenever the latest successful call's canonical request
+   * envelope matches `requestHeader`; the heuristic prices only surface growth
+   * past that anchor, and the complete envelope and surface are repriced when
+   * the anchor reports no usage or the envelope differs. The anchor includes
+   * all surface nodes immediately before the assistant message, including
+   * inputs admitted after step/start.
    *
    * `requestHeader` replaces the latest logged envelope for pressure and node
    * pricing; the node set always describes the current session surface. Every
@@ -161,13 +162,15 @@ export class TokenMeter extends Service {
       // compares like with like.
       const anchorSurfaceTokens = priceSurface(anchor.nodes, pricing, fileText).surfaceTokens
         + anchor.assistantTokens
-      const estimatedAnchorTokens = estimateToolsTokens(header) + anchorSurfaceTokens
       const usage = anchor.usage
-      // Signed heuristic deltas remain conservative only from an anchor
-      // that is at least as large as the matching full heuristic price.
-      baseline = usage !== undefined && usageTokens(usage) >= estimatedAnchorTokens
+      // A reported count describes the anchored request exactly, while the
+      // heuristic also prices content the request never carried (reasoning an
+      // adapter does not replay), so a usage anchor always beats its own
+      // estimate. The heuristic remains the base only for a call that reported
+      // no usage at all.
+      baseline = usage !== undefined
         ? { kind: 'usage', tokens: usageTokens(usage), usage }
-        : { kind: 'estimated', tokens: estimatedAnchorTokens }
+        : { kind: 'estimated', tokens: estimateToolsTokens(header) + anchorSurfaceTokens }
       surfaceDeltaTokens = surface.surfaceTokens - anchorSurfaceTokens
     } else if (header === undefined && surface.surfaceTokens === 0) {
       baseline = { kind: 'none', tokens: 0 }

@@ -1,7 +1,7 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { AssistantStreamAccumulator, createAssistantMessage, createUserMessage, createSystemMessage, ToolCallId, createMessage } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, Message, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId, SessionSeq, canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { EpochHeader, SessionEvent, SessionSeq as SessionSeqType } from '@deepseek-ai/dsh-session'
@@ -60,6 +60,12 @@ interface SuccessfulCallOptions {
   step?: number
   providerText?: string
   durableText?: string
+  /**
+   * Reasoning streamed by the provider and retained on the durable message. A
+   * route whose adapter does not replay reasoning sends none of this back, so
+   * the heuristic prices it while the provider count excludes it.
+   */
+  reasoning?: string
   usage?: TokenUsage
 }
 
@@ -72,25 +78,40 @@ function appendSuccessfulCall(
   const step = options.step ?? 1
   const providerText = options.providerText ?? 'provider answer'
   const durableText = options.durableText ?? providerText
+  const reasoning = options.reasoning
+  const textIndex = reasoning === undefined ? 0 : 1
   session.append('step/start', { turn, step })
   appendHeader(session, value)
 
+  const reasoningChunks: StreamChunk[] = []
+  if (reasoning !== undefined) {
+    reasoningChunks.push(
+      { type: 'block-start', index: 0, blockType: 'reasoning' },
+      { type: 'reasoning-delta', index: 0, text: reasoning },
+      { type: 'block-end', index: 0, block: { type: 'reasoning', text: reasoning } },
+    )
+  }
   const chunks = [
-    { type: 'block-start' as const, index: 0, blockType: 'text' as const },
-    { type: 'text-delta' as const, index: 0, text: providerText },
-    { type: 'block-end' as const, index: 0, block: { type: 'text' as const, text: providerText } },
+    ...reasoningChunks,
+    { type: 'block-start' as const, index: textIndex, blockType: 'text' as const },
+    { type: 'text-delta' as const, index: textIndex, text: providerText },
+    { type: 'block-end' as const, index: textIndex, block: { type: 'text' as const, text: providerText } },
     ...options.usage === undefined ? [] : [{ type: 'usage' as const, usage: options.usage }],
     { type: 'finish' as const, reason: { kind: 'stop' as const } },
   ]
   const accumulator = new AssistantStreamAccumulator()
   for (const [index, chunk] of chunks.entries()) accumulator.push({ time: index, chunk })
+  const durable: ContentBlock[] = [
+    ...reasoning === undefined ? [] : [{ type: 'reasoning' as const, text: reasoning }],
+    ...durableText.length === 0 ? [] : [{ type: 'text' as const, text: durableText }],
+  ]
   session.append('assistant/message', {
     stream: [...accumulator.snapshot()],
     turn,
     step,
     message: createMessage({
       role: 'assistant',
-      content: durableText.length === 0 ? [] : [{ type: 'text', text: durableText }],
+      content: durable,
       source: {
         kind: 'model',
         ...{
@@ -312,17 +333,23 @@ describe('replay anchors and surface folds', () => {
     }).toThrow(TypeError)
   })
 
-  it('selects a heuristic anchor when provider usage would undercut its scale', () => {
+  it('keeps the reported count as the base and prices only growth past it', () => {
     const service = meter()
     const session = Session.create(SessionId('low-usage-anchor'))
     appendSystem(session, 'system context')
+    // The provider answered a short request and reported 27 tokens for it. The
+    // heuristic prices the same anchored request higher, which is exactly the
+    // disagreement that used to discard the reported count.
     appendSuccessfulCall(session, header('deepseek-v4-flash'), {
       providerText: 'abcd'.repeat(512),
       usage: { inputTokens: 20, outputTokens: 7 },
     })
 
     const anchored = service.measure(session)
-    expect(anchored.baseline.kind).toBe('estimated')
+    expect(anchored.baseline).toMatchObject({ kind: 'usage', tokens: 27 })
+    expect(anchored.surfaceDeltaTokens).toBe(0)
+    expect(anchored.totalTokens).toBe(27)
+
     const assistant = anchored.nodes[1]!.seq
     session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'short' }],
@@ -332,13 +359,61 @@ describe('replay anchors and surface folds', () => {
       sourceEventSeqs: [assistant],
     })
 
+    // Shrinking the anchored surface drives the delta negative; the reported
+    // count stays the base and the floor keeps the total non-negative instead
+    // of silently repricing the whole session from the heuristic.
     const shrunken = service.measure(session)
+    expect(shrunken.baseline).toMatchObject({ kind: 'usage', tokens: 27 })
     expect(27 + shrunken.surfaceDeltaTokens).toBeLessThan(0)
-    expect(shrunken.totalTokens).toBeGreaterThan(0)
-    expect(shrunken.totalTokens).toBe(service.measure(
-      session,
-      header('different-model'),
-    ).totalTokens)
+    expect(shrunken.totalTokens).toBe(0)
+    expect(shrunken.totalTokens).toBeLessThan(anchored.totalTokens)
+  })
+
+  it('never prices reasoning the provider count already excludes', () => {
+    const service = meter()
+    const session = Session.create(SessionId('reasoning-route'))
+    appendSystem(session, 'system context')
+    // A reasoning-heavy turn whose route replays no reasoning: the durable
+    // transcript keeps it, the request does not carry it, and the provider
+    // counted only the 27 request tokens. Pricing the reasoning would double
+    // the meter and fire the rollover reminder at half the real budget.
+    appendSuccessfulCall(session, header('deepseek-v4-flash'), {
+      reasoning: 'r'.repeat(4096),
+      providerText: 'answer',
+      usage: { inputTokens: 20, outputTokens: 7, reasoningTokens: 4 },
+    })
+
+    const measurement = service.measure(session)
+    expect(measurement.baseline).toMatchObject({ kind: 'usage', tokens: 27 })
+    expect(measurement.totalTokens).toBe(27)
+    // The reasoning is still a priced surface node; the reported count is what
+    // makes the total disagree with the surface, which is the whole point.
+    expect(measurement.surfaceTokens).toBeGreaterThan(measurement.totalTokens)
+  })
+
+  it('keeps growth after the reported request on top of the reported count', () => {
+    const service = meter()
+    const session = Session.create(SessionId('reasoning-growth'))
+    appendSystem(session, 'system context')
+    appendSuccessfulCall(session, header('deepseek-v4-flash'), {
+      reasoning: 'r'.repeat(4096),
+      providerText: 'answer',
+      usage: { inputTokens: 20, outputTokens: 7 },
+    })
+    const anchored = service.measure(session)
+    expect(anchored.baseline).toMatchObject({ kind: 'usage', tokens: 27 })
+
+    // A tool result added after the anchored request is real new context, so
+    // it must land on top of the reported count rather than be dropped.
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'tool result '.repeat(40) }],
+      source: { kind: 'test' },
+    }), { surfaceOp: 'append' })
+
+    const grown = service.measure(session)
+    expect(grown.baseline).toMatchObject({ kind: 'usage', tokens: 27 })
+    expect(grown.surfaceDeltaTokens).toBeGreaterThan(0)
+    expect(grown.totalTokens).toBe(27 + grown.surfaceDeltaTokens)
   })
 
   it('uses an estimated anchor when provider usage is absent', () => {
