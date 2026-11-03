@@ -337,34 +337,48 @@ describe('replay anchors and surface folds', () => {
     const service = meter()
     const session = Session.create(SessionId('low-usage-anchor'))
     appendSystem(session, 'system context')
-    // The provider answered a short request and reported 27 tokens for it. The
-    // heuristic prices the same anchored request higher, which is exactly the
-    // disagreement that used to discard the reported count.
+    // A reasoning-heavy earlier turn leaves reasoning on the durable surface.
+    // The following request does not carry it back to the provider, so the
+    // provider's count for that request is far below the heuristic price of the
+    // same history. This is the shape the old guard always rejected.
     appendSuccessfulCall(session, header('deepseek-v4-flash'), {
-      providerText: 'abcd'.repeat(512),
-      usage: { inputTokens: 20, outputTokens: 7 },
+      reasoning: 'r'.repeat(20_000),
+      providerText: 'first answer',
+      usage: { inputTokens: 100, outputTokens: 10 },
+    })
+    appendSuccessfulCall(session, header('deepseek-v4-flash'), {
+      turn: 1,
+      step: 2,
+      providerText: 'second answer',
+      usage: { inputTokens: 110, outputTokens: 10 },
     })
 
     const anchored = service.measure(session)
-    expect(anchored.baseline).toMatchObject({ kind: 'usage', tokens: 27 })
+    expect(anchored.baseline).toMatchObject({ kind: 'usage', tokens: 120 })
     expect(anchored.surfaceDeltaTokens).toBe(0)
-    expect(anchored.totalTokens).toBe(27)
+    expect(anchored.totalTokens).toBe(120)
+    // The reasoning stays priced on the surface; the reported count is what
+    // makes the session total disagree with it.
+    expect(anchored.surfaceTokens).toBeGreaterThan(anchored.totalTokens)
 
-    const assistant = anchored.nodes[1]!.seq
+    const assistant = anchored.nodes.at(-1)!.seq
+    const reasoningNode = anchored.nodes[1]!.seq
+    // Replace both the reasoning-heavy node and the anchored answer, so the
+    // surface shrinks past the reported count.
     session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'short' }],
       source: { kind: 'test' },
     }), {
-      surfaceOp: { op: 'replace', startSeq: assistant, endSeq: assistant },
-      sourceEventSeqs: [assistant],
+      surfaceOp: { op: 'replace', startSeq: reasoningNode, endSeq: assistant },
+      sourceEventSeqs: [reasoningNode, assistant],
     })
 
-    // Shrinking the anchored surface drives the delta negative; the reported
-    // count stays the base and the floor keeps the total non-negative instead
-    // of silently repricing the whole session from the heuristic.
+    // The reported count stays the base even when the delta drives the total
+    // below zero, and the floor keeps it non-negative instead of silently
+    // repricing the whole session from the heuristic.
     const shrunken = service.measure(session)
-    expect(shrunken.baseline).toMatchObject({ kind: 'usage', tokens: 27 })
-    expect(27 + shrunken.surfaceDeltaTokens).toBeLessThan(0)
+    expect(shrunken.baseline).toMatchObject({ kind: 'usage', tokens: 120 })
+    expect(120 + shrunken.surfaceDeltaTokens).toBeLessThan(0)
     expect(shrunken.totalTokens).toBe(0)
     expect(shrunken.totalTokens).toBeLessThan(anchored.totalTokens)
   })
@@ -373,21 +387,25 @@ describe('replay anchors and surface folds', () => {
     const service = meter()
     const session = Session.create(SessionId('reasoning-route'))
     appendSystem(session, 'system context')
-    // A reasoning-heavy turn whose route replays no reasoning: the durable
-    // transcript keeps it, the request does not carry it, and the provider
-    // counted only the 27 request tokens. Pricing the reasoning would double
-    // the meter and fire the rollover reminder at half the real budget.
+    // Reasoning from an earlier turn persists on the durable transcript but is
+    // never replayed into the next request. The provider counted only what it
+    // received. Pricing the durable reasoning would inflate the meter and fire
+    // the rollover reminder at half the real budget.
     appendSuccessfulCall(session, header('deepseek-v4-flash'), {
-      reasoning: 'r'.repeat(4096),
-      providerText: 'answer',
-      usage: { inputTokens: 20, outputTokens: 7, reasoningTokens: 4 },
+      reasoning: 'r'.repeat(40_000),
+      providerText: 'first answer',
+      usage: { inputTokens: 100, outputTokens: 10, reasoningTokens: 40 },
+    })
+    appendSuccessfulCall(session, header('deepseek-v4-flash'), {
+      turn: 1,
+      step: 2,
+      providerText: 'second answer',
+      usage: { inputTokens: 110, outputTokens: 10 },
     })
 
     const measurement = service.measure(session)
-    expect(measurement.baseline).toMatchObject({ kind: 'usage', tokens: 27 })
-    expect(measurement.totalTokens).toBe(27)
-    // The reasoning is still a priced surface node; the reported count is what
-    // makes the total disagree with the surface, which is the whole point.
+    expect(measurement.baseline).toMatchObject({ kind: 'usage', tokens: 120 })
+    expect(measurement.totalTokens).toBe(120)
     expect(measurement.surfaceTokens).toBeGreaterThan(measurement.totalTokens)
   })
 
@@ -396,12 +414,18 @@ describe('replay anchors and surface folds', () => {
     const session = Session.create(SessionId('reasoning-growth'))
     appendSystem(session, 'system context')
     appendSuccessfulCall(session, header('deepseek-v4-flash'), {
-      reasoning: 'r'.repeat(4096),
-      providerText: 'answer',
-      usage: { inputTokens: 20, outputTokens: 7 },
+      reasoning: 'r'.repeat(40_000),
+      providerText: 'first answer',
+      usage: { inputTokens: 100, outputTokens: 10 },
+    })
+    appendSuccessfulCall(session, header('deepseek-v4-flash'), {
+      turn: 1,
+      step: 2,
+      providerText: 'second answer',
+      usage: { inputTokens: 110, outputTokens: 10 },
     })
     const anchored = service.measure(session)
-    expect(anchored.baseline).toMatchObject({ kind: 'usage', tokens: 27 })
+    expect(anchored.baseline).toMatchObject({ kind: 'usage', tokens: 120 })
 
     // A tool result added after the anchored request is real new context, so
     // it must land on top of the reported count rather than be dropped.
@@ -411,9 +435,9 @@ describe('replay anchors and surface folds', () => {
     }), { surfaceOp: 'append' })
 
     const grown = service.measure(session)
-    expect(grown.baseline).toMatchObject({ kind: 'usage', tokens: 27 })
+    expect(grown.baseline).toMatchObject({ kind: 'usage', tokens: 120 })
     expect(grown.surfaceDeltaTokens).toBeGreaterThan(0)
-    expect(grown.totalTokens).toBe(27 + grown.surfaceDeltaTokens)
+    expect(grown.totalTokens).toBe(120 + grown.surfaceDeltaTokens)
   })
 
   it('uses an estimated anchor when provider usage is absent', () => {
