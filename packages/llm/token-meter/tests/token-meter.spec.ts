@@ -139,10 +139,15 @@ function expectSurfaceTotal(measurement: TokenMeasurement): void {
 }
 
 /**
- * Append a reasoning-heavy turn followed by a second successful call whose
- * reported usage is the sole anchor. The prior reasoning stays on the durable
- * surface but is never replayed into that second request, which is the live
- * shape: the reported count is far below the heuristic price of the history.
+ * Append a reasoning-heavy turn, the user message that starts the next turn,
+ * and a second successful call whose reported usage is the sole anchor.
+ *
+ * The transition matches the live loop: a text-only step completes its turn
+ * (`agent.ts`, no tool call means `completed`), so the next assistant call is
+ * reachable only after a new user message. The prior reasoning stays on the
+ * durable surface but is never replayed into that second request, which is the
+ * live shape: the reported count is far below the heuristic price of the whole
+ * history.
  * @param session - session to grow.
  * @param reasoning - reasoning text of the first turn.
  * @param reported - provider count of the second, anchoring call.
@@ -157,9 +162,13 @@ function appendReasoningHistory(
     providerText: 'first answer',
     usage: { inputTokens: 100, outputTokens: 10 },
   })
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: 'next question' }],
+    source: { kind: 'user' },
+  }), { surfaceOp: 'append' })
   appendSuccessfulCall(session, header('deepseek-v4-flash'), {
-    turn: 1,
-    step: 2,
+    turn: 2,
+    step: 1,
     providerText: 'second answer',
     usage: reported,
   })
@@ -376,14 +385,15 @@ describe('replay anchors and surface folds', () => {
 
     const assistant = anchored.nodes.at(-1)!.seq
     const reasoningNode = anchored.nodes[1]!.seq
-    // Replace both the reasoning-heavy node and the anchored answer, so the
-    // surface shrinks past the reported count.
+    // Replace every node from the reasoning-heavy turn through the anchored
+    // answer, so the surface shrinks past the reported count.
+    const shadowed = anchored.nodes.slice(1)
     session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'short' }],
       source: { kind: 'test' },
     }), {
       surfaceOp: { op: 'replace', startSeq: reasoningNode, endSeq: assistant },
-      sourceEventSeqs: [reasoningNode, assistant],
+      sourceEventSeqs: shadowed.map(node => node.seq),
     })
 
     // The reported count stays the base even when the delta drives the total
