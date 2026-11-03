@@ -232,7 +232,14 @@ function replayedAssistant(
         id: block.id,
         name: block.name,
         arguments: parseArguments(block.arguments),
-        ...replay.type === 'tool-call' && replay.thoughtSignature !== undefined ? { thoughtSignature: replay.thoughtSignature } : {},
+        // A legacy encrypted detail on the tool call outranks every signature on
+        // a thinking block, so leaving it here would suppress the declared
+        // field: pi-ai would send that blob instead of the reasoning. The
+        // declaration is the route's statement of what its endpoint reads, so it
+        // wins; the durable state keeps the signature untouched either way.
+        ...replay.type === 'tool-call' && replay.thoughtSignature !== undefined && thoughtReplayField === undefined
+          ? { thoughtSignature: replay.thoughtSignature }
+          : {},
       }
       /* v8 ignore next -- readReplayState rejects unknown replay tags, so an equal plugin-added Harness tag cannot reach this switch */
       default: return invalidReplay(`block ${index} has an unsupported Harness type`)

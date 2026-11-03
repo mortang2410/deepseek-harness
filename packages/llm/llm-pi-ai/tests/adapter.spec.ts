@@ -9,7 +9,7 @@ import type {
   SaveImageAttachment,
   StoredImageAttachment,
 } from '@deepseek-ai/dsh-attachment'
-import LlmRuntime, { createToolResultMessage, createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, ReasoningEffortId, userAgent } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createMessage, createToolResultMessage, createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, ReasoningEffortId, ToolCallId, userAgent } from '@deepseek-ai/dsh-llm'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -785,6 +785,63 @@ describe('provider profile lifecycle', () => {
       .find(message => message['role'] === 'assistant')
     expect(replay).toHaveProperty('reasoning_details')
     expect(replay).not.toHaveProperty('reasoning_content')
+  })
+
+  it('sends the declared field even when a tool call carries a legacy encrypted detail', async () => {
+    vi.stubEnv('PI_TEST_KEY', 'test-key')
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'acme-gateway': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'openai-completions',
+          baseURL: `${server.url}/v1`,
+          models: [{
+            id: 'acme-think',
+            contextWindow: 65_536,
+            maxTokens: 4096,
+            reasoningEfforts: { off: null, high: 'high' },
+            thoughtReplayField: 'reasoning_content',
+          }],
+        },
+      },
+    })
+    // pi-ai prefers an encrypted detail found on a tool call over anything a
+    // thinking block carries, so a leftover legacy signature would suppress the
+    // declared field and send only the blob.
+    const replayState = {
+      response: {
+        kind: 'pi-ai', version: 2, api: 'openai-completions', provider: 'acme-gateway',
+        model: 'acme-think', stopReason: 'toolUse',
+      },
+      blocks: [
+        { type: 'reasoning', thinkingSignature: '[{"index":0,"type":"reasoning.text","text":"x"}]' },
+        { type: 'tool-call', thoughtSignature: JSON.stringify({ id: 'rs_1', type: 'reasoning.encrypted', data: 'BLOB' }) },
+      ],
+    }
+    await assemble(ctx, {
+      provider: 'acme-gateway',
+      model: 'acme-think',
+      reasoningEffort: ReasoningEffortId('high'),
+      messages: [
+        createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }),
+        createMessage({
+          role: 'assistant',
+          content: [
+            { type: 'reasoning', text: 'deliberation' },
+            { type: 'tool-call', id: ToolCallId('c1'), name: 'bash', arguments: '{}' },
+          ],
+          source: { kind: 'model', provider: 'acme-gateway', model: 'acme-think', replayState },
+        }),
+        createToolResultMessage({ callId: ToolCallId('c1'), content: [{ type: 'text', text: 'ok' }], isError: false }),
+      ],
+    })
+    const replay = (server.requests[0] as { messages: Record<string, unknown>[] }).messages
+      .find(message => message['role'] === 'assistant')
+    expect(replay).toMatchObject({ reasoning_content: 'deliberation' })
+    expect(replay).not.toHaveProperty('reasoning_details')
   })
 
   it('keeps the system role on a declared route whose gateway rejects the developer one', async () => {
