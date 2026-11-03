@@ -630,6 +630,13 @@ export interface PiAiModelProfile {
    * other name is one it cannot send. The durable replay state keeps the
    * provider's original data either way: this changes the request, never the
    * record.
+   *
+   * Ceiling: pi-ai sends opaque `reasoning.encrypted` details only by parsing
+   * them out of the signature, so declaring a field replaces that payload with
+   * plain thinking text in the named field. An endpoint that requires encrypted
+   * replay state to resume a turn must therefore not declare this, and the
+   * adapter cannot detect that requirement: nothing in a streamed signature
+   * says whether the endpoint needs the blob back.
    */
   thoughtReplayField?: PiAiThoughtReplayField
   /** pi-ai wire-compatibility switches for this model, winning over the route's per field; one its protocol does not declare is refused. */
@@ -649,6 +656,16 @@ export type PiAiThoughtReplayField = typeof PI_AI_THOUGHT_REPLAY_FIELDS[number]
 /** Whether a configured value is a field pi-ai can write. */
 function isThoughtReplayField(value: string): value is PiAiThoughtReplayField {
   return (PI_AI_THOUGHT_REPLAY_FIELDS as readonly string[]).includes(value)
+}
+
+/**
+ * Whether this model's protocol folds thinking into `content` rather than a
+ * reasoning field. Only the completions protocol has the switch, so the union
+ * is narrowed by protocol before the field is read.
+ */
+function thinkingTravelsAsText(model: Model<Api>): boolean {
+  if (model.api !== 'openai-completions') return false
+  return (model.compat as OpenAICompletionsCompat | undefined)?.requiresThinkingAsText === true
 }
 
 /**
@@ -1015,14 +1032,22 @@ export function resolveRouteModels(
     invalid(provider, `sets compat "${field}", but no model on the route speaks a protocol that takes it;`
       + ` it exists on ${takers.join(', ')}`)
   }
-  // Only the completions protocol replays reasoning through a named request
-  // field; the others carry it in protocol-native signed blocks. Accepting the
-  // setting elsewhere would report a remedy the request never applies.
+  // A declared replay field is a promise about the request that pi-ai can only
+  // keep on the completions protocol, and only while thinking does not travel
+  // inside `content`. Either mismatch would leave the declaration describing a
+  // request it cannot shape, so both are refused here rather than on the wire.
   for (const [id, field] of thoughtReplayFields) {
     const model = serviceableModels.find(candidate => candidate.id === id)
-    if (model === undefined || model.api === 'openai-completions') continue
-    invalid(provider, `model "${id}" sets thoughtReplayField to "${field}", but its api is "${model.api}",`
-      + ' which replays reasoning in its own protocol blocks; that switch exists on openai-completions')
+    if (model === undefined) continue
+    if (model.api !== 'openai-completions') {
+      invalid(provider, `model "${id}" sets thoughtReplayField to "${field}", but its api is "${model.api}",`
+        + ' which replays reasoning in its own protocol blocks; that switch exists on openai-completions')
+    }
+    if (thinkingTravelsAsText(model)) {
+      invalid(provider, `model "${id}" sets thoughtReplayField to "${field}", but its compat sets`
+        + ' requiresThinkingAsText, which sends thinking inside content instead of a reasoning field;'
+        + ' a route cannot declare both')
+    }
   }
   return { models: serviceableModels, configuredMaxTokens, modelErrors, thoughtReplayFields }
 }

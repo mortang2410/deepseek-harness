@@ -282,6 +282,31 @@ describe('hand-declared providers', () => {
     })).toThrow(/defaultInput must name at least one modality/)
   })
 
+  it('accepts a declared replay field only where the request can carry it', () => {
+    const declare = (model: LlmPiAi.PiAiModelProfile, extra: Record<string, unknown> = {}): (() => unknown) =>
+      () => resolveProfiles({
+        'acme-gateway': { api: 'openai-completions', baseURL: 'https://acme.test', models: [model], ...extra },
+      })
+
+    // The switch only means anything on the completions protocol, and only
+    // while thinking travels in a reasoning field rather than inside content.
+    expect(declare({ id: 'ok', thoughtReplayField: 'reasoning_content' })).not.toThrow()
+    expect(declare({ id: 'bad-field', thoughtReplayField: 'reasoning_delta' as never })).toThrow(
+      /thoughtReplayField to "reasoning_delta", which is not one of reasoning, reasoning_content, reasoning_text/,
+    )
+    expect(declare({ id: 'as-text', thoughtReplayField: 'reasoning_content', compat: { requiresThinkingAsText: true } }))
+      .toThrow(/requiresThinkingAsText, which sends thinking inside content/)
+
+    // A route's own `api` overrides a model's, so the refusal has to be driven
+    // by a catalog entry whose protocol the route does not repoint: that is the
+    // only way a non-completions model reaches the resolver.
+    const vision = getBuiltinModels('anthropic').find(model => model.input.includes('image'))
+    if (vision === undefined) throw new Error('the installed catalog ships no anthropic vision model')
+    expect(() => resolveProfiles({
+      anthropic: { modelOverrides: { [vision.id]: { thoughtReplayField: 'reasoning_content' } } },
+    })).toThrow(/its api is "anthropic-messages"/)
+  })
+
   it('rejects a model the route cannot identify', () => {
     const declare = (model: LlmPiAi.PiAiModelProfile): (() => unknown) =>
       () => resolveProfiles({ 'acme-gateway': { api: 'openai-completions', baseURL: 'https://acme.test', models: [model] } })
