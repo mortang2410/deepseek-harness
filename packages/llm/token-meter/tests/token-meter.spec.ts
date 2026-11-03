@@ -73,7 +73,7 @@ function appendSuccessfulCall(
   session: Session,
   value: EpochHeader,
   options: SuccessfulCallOptions = {},
-): void {
+): SessionSeqType {
   const turn = options.turn ?? 1
   const step = options.step ?? 1
   const providerText = options.providerText ?? 'provider answer'
@@ -105,7 +105,7 @@ function appendSuccessfulCall(
     ...reasoning === undefined ? [] : [{ type: 'reasoning' as const, text: reasoning }],
     ...durableText.length === 0 ? [] : [{ type: 'text' as const, text: durableText }],
   ]
-  session.append('assistant/message', {
+  const assistant = session.append('assistant/message', {
     stream: [...accumulator.snapshot()],
     turn,
     step,
@@ -121,8 +121,9 @@ function appendSuccessfulCall(
       },
     }),
     ...options.usage === undefined ? {} : { usage: options.usage },
-  }, { surfaceOp: 'append' })
+  }, { surfaceOp: 'append' }).seq
   session.append('step/end', { turn, step })
+  return assistant
 }
 
 function meter(config: TokenMeterConfig = {}): TokenMeter {
@@ -138,40 +139,63 @@ function expectSurfaceTotal(measurement: TokenMeasurement): void {
     .toBe(measurement.surfaceTokens)
 }
 
+/** One surface node the reasoning history keeps priced after its anchoring call. */
+interface ReasoningHistorySurface {
+  /** Seq of the reasoning-bearing assistant answer: the replacement start. */
+  readonly reasoningAssistant: SessionSeqType
+  /** Seq of the final, anchored assistant answer: the replacement end. */
+  readonly anchoredAssistant: SessionSeqType
+  /** Every node the replacement shadows, so the shrink range names them all. */
+  readonly shadowed: readonly SessionSeqType[]
+}
+
 /**
- * Append a reasoning-heavy turn, the user message that starts the next turn,
- * and a second successful call whose reported usage is the sole anchor.
+ * Append a whole reachable conversation that ends on an anchored call: an
+ * opening user turn, a reasoning-heavy answer that completes its turn, the
+ * followup that starts the next turn, and a second successful call whose
+ * reported usage is the sole anchor.
  *
- * The transition matches the live loop: a text-only step completes its turn
- * (`agent.ts`, no tool call means `completed`), so the next assistant call is
- * reachable only after a new user message. The prior reasoning stays on the
- * durable surface but is never replayed into that second request, which is the
- * live shape: the reported count is far below the heuristic price of the whole
- * history.
+ * Every step matches the live loop rather than merely the transcript shape. An
+ * initial step exits `completed` without a model call when it has no admitted
+ * input, and admitted input is committed as `user/message` before the request,
+ * so the first call sits behind a real opening turn. A text-only step completes
+ * its turn, so the second call is reachable only after a followup. The prior
+ * reasoning stays on the durable surface but is never replayed into that second
+ * request, which is the live shape: the reported count is far below the
+ * heuristic price of the whole history.
  * @param session - session to grow.
  * @param reasoning - reasoning text of the first turn.
  * @param reported - provider count of the second, anchoring call.
+ * @returns the seqs a shrink replacement needs, with roles made explicit.
  */
 function appendReasoningHistory(
   session: Session,
   reasoning: string,
   reported: { inputTokens: number; outputTokens: number },
-): void {
-  appendSuccessfulCall(session, header('deepseek-v4-flash'), {
+): ReasoningHistorySurface {
+  const intent = { surfaceOp: 'append' as const }
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: 'open the conversation' }],
+    source: { kind: 'user' },
+  }), intent)
+  const reasoningAssistant = appendSuccessfulCall(session, header('deepseek-v4-flash'), {
     reasoning,
     providerText: 'first answer',
     usage: { inputTokens: 100, outputTokens: 10 },
   })
-  session.append('user/message', createUserMessage({
+  // The followup is a `next-turn` user message: the text-only step above ends
+  // its turn, so this one is what makes the second call reachable.
+  const followup = session.append('user/message', createUserMessage({
     content: [{ type: 'text', text: 'next question' }],
     source: { kind: 'user' },
-  }), { surfaceOp: 'append' })
-  appendSuccessfulCall(session, header('deepseek-v4-flash'), {
+  }), intent).seq
+  const anchoredAssistant = appendSuccessfulCall(session, header('deepseek-v4-flash'), {
     turn: 2,
     step: 1,
     providerText: 'second answer',
     usage: reported,
   })
+  return { reasoningAssistant, anchoredAssistant, shadowed: [reasoningAssistant, followup, anchoredAssistant] }
 }
 
 describe('TokenMeter configuration and registration', () => {
@@ -373,7 +397,7 @@ describe('replay anchors and surface folds', () => {
     const service = meter()
     const session = Session.create(SessionId('low-usage-anchor'))
     appendSystem(session, 'system context')
-    appendReasoningHistory(session, 'r'.repeat(20_000), { inputTokens: 110, outputTokens: 10 })
+    const surface = appendReasoningHistory(session, 'r'.repeat(20_000), { inputTokens: 110, outputTokens: 10 })
 
     const anchored = service.measure(session)
     expect(anchored.baseline).toMatchObject({ kind: 'usage', tokens: 120 })
@@ -383,17 +407,20 @@ describe('replay anchors and surface folds', () => {
     // makes the session total disagree with it.
     expect(anchored.surfaceTokens).toBeGreaterThan(anchored.totalTokens)
 
-    const assistant = anchored.nodes.at(-1)!.seq
-    const reasoningNode = anchored.nodes[1]!.seq
     // Replace every node from the reasoning-heavy turn through the anchored
-    // answer, so the surface shrinks past the reported count.
-    const shadowed = anchored.nodes.slice(1)
+    // answer, so the surface shrinks past the reported count. The range starts
+    // at the reasoning assistant, not the opening user turn, so the opening
+    // turn legitimately survives the shrink.
     session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'short' }],
       source: { kind: 'test' },
     }), {
-      surfaceOp: { op: 'replace', startSeq: reasoningNode, endSeq: assistant },
-      sourceEventSeqs: shadowed.map(node => node.seq),
+      surfaceOp: {
+        op: 'replace',
+        startSeq: surface.reasoningAssistant,
+        endSeq: surface.anchoredAssistant,
+      },
+      sourceEventSeqs: [...surface.shadowed],
     })
 
     // The reported count stays the base even when the delta drives the total
