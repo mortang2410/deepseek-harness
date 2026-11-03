@@ -138,6 +138,33 @@ function expectSurfaceTotal(measurement: TokenMeasurement): void {
     .toBe(measurement.surfaceTokens)
 }
 
+/**
+ * Append a reasoning-heavy turn followed by a second successful call whose
+ * reported usage is the sole anchor. The prior reasoning stays on the durable
+ * surface but is never replayed into that second request, which is the live
+ * shape: the reported count is far below the heuristic price of the history.
+ * @param session - session to grow.
+ * @param reasoning - reasoning text of the first turn.
+ * @param reported - provider count of the second, anchoring call.
+ */
+function appendReasoningHistory(
+  session: Session,
+  reasoning: string,
+  reported: { inputTokens: number; outputTokens: number },
+): void {
+  appendSuccessfulCall(session, header('deepseek-v4-flash'), {
+    reasoning,
+    providerText: 'first answer',
+    usage: { inputTokens: 100, outputTokens: 10 },
+  })
+  appendSuccessfulCall(session, header('deepseek-v4-flash'), {
+    turn: 1,
+    step: 2,
+    providerText: 'second answer',
+    usage: reported,
+  })
+}
+
 describe('TokenMeter configuration and registration', () => {
   it('exposes an empty public configuration type', () => {
     expectTypeOf<{}>().toExtend<TokenMeterConfig>()
@@ -337,21 +364,7 @@ describe('replay anchors and surface folds', () => {
     const service = meter()
     const session = Session.create(SessionId('low-usage-anchor'))
     appendSystem(session, 'system context')
-    // A reasoning-heavy earlier turn leaves reasoning on the durable surface.
-    // The following request does not carry it back to the provider, so the
-    // provider's count for that request is far below the heuristic price of the
-    // same history. This is the shape the old guard always rejected.
-    appendSuccessfulCall(session, header('deepseek-v4-flash'), {
-      reasoning: 'r'.repeat(20_000),
-      providerText: 'first answer',
-      usage: { inputTokens: 100, outputTokens: 10 },
-    })
-    appendSuccessfulCall(session, header('deepseek-v4-flash'), {
-      turn: 1,
-      step: 2,
-      providerText: 'second answer',
-      usage: { inputTokens: 110, outputTokens: 10 },
-    })
+    appendReasoningHistory(session, 'r'.repeat(20_000), { inputTokens: 110, outputTokens: 10 })
 
     const anchored = service.measure(session)
     expect(anchored.baseline).toMatchObject({ kind: 'usage', tokens: 120 })
@@ -387,21 +400,9 @@ describe('replay anchors and surface folds', () => {
     const service = meter()
     const session = Session.create(SessionId('reasoning-route'))
     appendSystem(session, 'system context')
-    // Reasoning from an earlier turn persists on the durable transcript but is
-    // never replayed into the next request. The provider counted only what it
-    // received. Pricing the durable reasoning would inflate the meter and fire
-    // the rollover reminder at half the real budget.
-    appendSuccessfulCall(session, header('deepseek-v4-flash'), {
-      reasoning: 'r'.repeat(40_000),
-      providerText: 'first answer',
-      usage: { inputTokens: 100, outputTokens: 10, reasoningTokens: 40 },
-    })
-    appendSuccessfulCall(session, header('deepseek-v4-flash'), {
-      turn: 1,
-      step: 2,
-      providerText: 'second answer',
-      usage: { inputTokens: 110, outputTokens: 10 },
-    })
+    // Pricing the durable reasoning would inflate the meter and fire the
+    // rollover reminder at half the real budget.
+    appendReasoningHistory(session, 'r'.repeat(40_000), { inputTokens: 110, outputTokens: 10 })
 
     const measurement = service.measure(session)
     expect(measurement.baseline).toMatchObject({ kind: 'usage', tokens: 120 })
@@ -413,17 +414,7 @@ describe('replay anchors and surface folds', () => {
     const service = meter()
     const session = Session.create(SessionId('reasoning-growth'))
     appendSystem(session, 'system context')
-    appendSuccessfulCall(session, header('deepseek-v4-flash'), {
-      reasoning: 'r'.repeat(40_000),
-      providerText: 'first answer',
-      usage: { inputTokens: 100, outputTokens: 10 },
-    })
-    appendSuccessfulCall(session, header('deepseek-v4-flash'), {
-      turn: 1,
-      step: 2,
-      providerText: 'second answer',
-      usage: { inputTokens: 110, outputTokens: 10 },
-    })
+    appendReasoningHistory(session, 'r'.repeat(40_000), { inputTokens: 110, outputTokens: 10 })
     const anchored = service.measure(session)
     expect(anchored.baseline).toMatchObject({ kind: 'usage', tokens: 120 })
 
