@@ -18,6 +18,7 @@ import type { Context as PiContext, ImageContent, Message as PiMessage, TextCont
 import { toPiAssistant } from './replay.ts'
 import { requestImageDimensions } from '@deepseek-ai/dsh-attachment'
 import { DEFAULT_REQUEST_IMAGE_MAX_BYTES, DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET } from './config.ts'
+import type { PiAiThoughtReplayField } from './catalog.ts'
 
 /** Join the text blocks of a harness message. */
 function flattenText(message: RequestMessage): string {
@@ -178,8 +179,9 @@ function appendAssistant(
   messages: PiMessage[],
   toolNames: Map<ToolCallId, string>,
   onReplayDegrade?: (reason: string) => void,
+  thoughtReplayField?: PiAiThoughtReplayField,
 ): void {
-  const assistant = toPiAssistant(message, onReplayDegrade)
+  const assistant = toPiAssistant(message, onReplayDegrade, thoughtReplayField)
   for (const block of assistant.content) {
     if (block.type === 'toolCall') toolNames.set(brandString<ToolCallId>(block.id), block.name)
   }
@@ -192,6 +194,7 @@ function appendSystemOrAssistant(
   messages: PiMessage[],
   toolNames: Map<ToolCallId, string>,
   onReplayDegrade?: (reason: string) => void,
+  thoughtReplayField?: PiAiThoughtReplayField,
 ): boolean {
   if (message.role === 'system') {
     // pi-ai has a single systemPrompt slot; a system message that did not
@@ -200,13 +203,17 @@ function appendSystemOrAssistant(
     return true
   }
   if (message.role === 'assistant') {
-    appendAssistant(message, messages, toolNames, onReplayDegrade)
+    appendAssistant(message, messages, toolNames, onReplayDegrade, thoughtReplayField)
     return true
   }
   return false
 }
 
-function textOnlyContext(options: GenerateOptions, onReplayDegrade?: (reason: string) => void): PiContext {
+function textOnlyContext(
+  options: GenerateOptions,
+  onReplayDegrade?: (reason: string) => void,
+  thoughtReplayField?: PiAiThoughtReplayField,
+): PiContext {
   assertSupportedHistory(options.messages)
   const split = splitSystemPrompt(options)
   const toolNames = new Map<ToolCallId, string>()
@@ -215,7 +222,7 @@ function textOnlyContext(options: GenerateOptions, onReplayDegrade?: (reason: st
     if (contentHasImage(message.content)) {
       throw new LlmError('pi-ai image conversion requires the durable attachment service', 'UNSUPPORTED_CONTENT')
     }
-    if (appendSystemOrAssistant(message, messages, toolNames, onReplayDegrade)) continue
+    if (appendSystemOrAssistant(message, messages, toolNames, onReplayDegrade, thoughtReplayField)) continue
     if (message.role === 'tool') {
       messages.push(toolResultOf(message, toolNames, flattenText(message)))
       continue
@@ -263,6 +270,7 @@ export function toPiContext(
   options: GenerateOptions,
   images?: undefined,
   onReplayDegrade?: (reason: string) => void,
+  thoughtReplayField?: PiAiThoughtReplayField,
 ): PiContext
 /**
  * Convert harness history to a pi-ai Context while resolving durable images.
@@ -280,21 +288,24 @@ export function toPiContext(
   options: GenerateOptions,
   images: PiImageRequestContext,
   onReplayDegrade?: (reason: string) => void,
+  thoughtReplayField?: PiAiThoughtReplayField,
 ): Promise<PiContext>
 export function toPiContext(
   options: GenerateOptions,
   images?: PiImageRequestContext,
   onReplayDegrade?: (reason: string) => void,
+  thoughtReplayField?: PiAiThoughtReplayField,
 ): PiContext | Promise<PiContext> {
   return images === undefined
-    ? textOnlyContext(options, onReplayDegrade)
-    : toPiContextWithImages(options, images, onReplayDegrade)
+    ? textOnlyContext(options, onReplayDegrade, thoughtReplayField)
+    : toPiContextWithImages(options, images, onReplayDegrade, thoughtReplayField)
 }
 
 async function toPiContextWithImages(
   options: GenerateOptions,
   images: PiImageRequestContext,
   onReplayDegrade?: (reason: string) => void,
+  thoughtReplayField?: PiAiThoughtReplayField,
 ): Promise<PiContext> {
   const { attachments, resolveImageAccess, maxRequestImageBytes } = images
   const requestImagePolicy = images.requestImagePolicy ?? {
@@ -326,7 +337,7 @@ async function toPiContextWithImages(
   const messages: PiMessage[] = []
 
   for (const message of exactMessages) {
-    if (appendSystemOrAssistant(message, messages, toolNames, onReplayDegrade)) continue
+    if (appendSystemOrAssistant(message, messages, toolNames, onReplayDegrade, thoughtReplayField)) continue
     if (message.role === 'tool') {
       messages.push(toolResultOf(message, toolNames, userContent(message.content, requestImages, resolveImageAccess)))
       continue

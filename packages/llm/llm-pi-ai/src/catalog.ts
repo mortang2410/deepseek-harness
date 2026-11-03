@@ -618,8 +618,37 @@ export interface PiAiModelProfile {
    * declares the offered levels and their wire spellings.
    */
   reasoningEfforts?: false | PiAiReasoningEfforts
+  /**
+   * Request field this model's endpoint reads prior-turn reasoning from.
+   *
+   * Absent leaves replay to the provider's own replay data: pi-ai sends
+   * whatever the thinking signature describes, which for an endpoint that
+   * streams `reasoning_details` is `reasoning_details` on every later request.
+   * Naming a field here is how a deployment tells the adapter that its endpoint
+   * discards that spelling and reads another, so replayed reasoning can survive
+   * the round trip. Only spellings pi-ai itself writes are accepted, because any
+   * other name is one it cannot send. The durable replay state keeps the
+   * provider's original data either way: this changes the request, never the
+   * record.
+   */
+  thoughtReplayField?: PiAiThoughtReplayField
   /** pi-ai wire-compatibility switches for this model, winning over the route's per field; one its protocol does not declare is refused. */
   compat?: PiAiCompatProfile
+}
+
+/**
+ * Request fields that carry prior-turn reasoning to an OpenAI-compatible
+ * endpoint. This is pi-ai's own set, so a profile can only name a field pi-ai
+ * is able to write.
+ */
+export const PI_AI_THOUGHT_REPLAY_FIELDS = ['reasoning', 'reasoning_content', 'reasoning_text'] as const
+
+/** One accepted {@link PI_AI_THOUGHT_REPLAY_FIELDS} entry. */
+export type PiAiThoughtReplayField = typeof PI_AI_THOUGHT_REPLAY_FIELDS[number]
+
+/** Whether a configured value is a field pi-ai can write. */
+function isThoughtReplayField(value: string): value is PiAiThoughtReplayField {
+  return (PI_AI_THOUGHT_REPLAY_FIELDS as readonly string[]).includes(value)
 }
 
 /**
@@ -827,6 +856,16 @@ export interface RouteCatalog {
    * picked, so only an explicit configuration lands here.
    */
   configuredMaxTokens: ReadonlyMap<string, number>
+  /**
+   * Models whose replayed reasoning must travel in a specific request field,
+   * by model id, resolved from `thoughtReplayField`.
+   *
+   * Separate from `Model` because pi-ai chooses the field from the thinking
+   * signature, which records what the endpoint *sent*; this records what the
+   * endpoint *reads*, and the two differ when a gateway restreams one spelling
+   * and discards another.
+   */
+  thoughtReplayFields: ReadonlyMap<string, PiAiThoughtReplayField>
 }
 
 /**
@@ -892,11 +931,21 @@ export function resolveRouteModels(
   assertOfferedCompatFields(provider, 'route', request.compat)
   const seen = new Set<string>()
   const configuredMaxTokens = new Map<string, number>()
+  const thoughtReplayFields = new Map<string, PiAiThoughtReplayField>()
   const resolveEntry = (entry: PiAiModelProfile): Model<Api> => {
     assertOfferedCompatFields(provider, `model "${entry.id}"`, entry.compat)
     if (entry.id.length === 0) invalid(provider, 'has a model with an empty id')
     if (seen.has(entry.id)) invalid(provider, `lists model "${entry.id}" more than once`)
     seen.add(entry.id)
+    // A spelling pi-ai cannot write would look applied and send nothing, so the
+    // vocabulary is closed here rather than left to the endpoint to refuse.
+    if (entry.thoughtReplayField !== undefined) {
+      if (!isThoughtReplayField(entry.thoughtReplayField)) {
+        invalid(provider, `model "${entry.id}" sets thoughtReplayField to "${entry.thoughtReplayField}", which is not`
+          + ` one of ${PI_AI_THOUGHT_REPLAY_FIELDS.join(', ')}`)
+      }
+      thoughtReplayFields.set(entry.id, entry.thoughtReplayField)
+    }
     const base = defaults.get(entry.id)
     const api = request.api ?? base?.api ?? routeApi
     if (api === undefined) {
@@ -966,5 +1015,14 @@ export function resolveRouteModels(
     invalid(provider, `sets compat "${field}", but no model on the route speaks a protocol that takes it;`
       + ` it exists on ${takers.join(', ')}`)
   }
-  return { models: serviceableModels, configuredMaxTokens, modelErrors }
+  // Only the completions protocol replays reasoning through a named request
+  // field; the others carry it in protocol-native signed blocks. Accepting the
+  // setting elsewhere would report a remedy the request never applies.
+  for (const [id, field] of thoughtReplayFields) {
+    const model = serviceableModels.find(candidate => candidate.id === id)
+    if (model === undefined || model.api === 'openai-completions') continue
+    invalid(provider, `model "${id}" sets thoughtReplayField to "${field}", but its api is "${model.api}",`
+      + ' which replays reasoning in its own protocol blocks; that switch exists on openai-completions')
+  }
+  return { models: serviceableModels, configuredMaxTokens, modelErrors, thoughtReplayFields }
 }

@@ -676,6 +676,117 @@ describe('provider profile lifecycle', () => {
     expect(server.requests[1]).not.toHaveProperty('reasoning_effort')
   })
 
+  it('replays prior reasoning in the field the route declares, not the one the endpoint streamed', async () => {
+    vi.stubEnv('PI_TEST_KEY', 'test-key')
+    // A gateway that streams `reasoning_details` and discards them on the way
+    // back in: pi-ai records the details as the thinking signature and would
+    // replay `reasoning_details` on the next turn, which this endpoint ignores.
+    const reasoningEvents = [
+      '{"choices":[{"delta":{"role":"assistant"},"index":0,"finish_reason":null}]}',
+      '{"choices":[{"delta":{"reasoning":"deliberation","reasoning_details":[{"type":"reasoning.text","text":"deliberation","format":"unknown","index":0}]},"index":0,"finish_reason":null}]}',
+      '{"choices":[{"delta":{"content":"hello"},"index":0,"finish_reason":null}]}',
+      '{"choices":[{"delta":{},"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}',
+      '[DONE]',
+    ]
+    const server = await mockServer([{ events: reasoningEvents }, { events: textEvents }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'acme-gateway': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'openai-completions',
+          baseURL: `${server.url}/v1`,
+          models: [{
+            id: 'acme-think',
+            contextWindow: 65_536,
+            maxTokens: 4096,
+            reasoningEfforts: { off: null, high: 'high' },
+            thoughtReplayField: 'reasoning_content',
+          }],
+        },
+      },
+    })
+
+    const first = await assemble(ctx, {
+      provider: 'acme-gateway',
+      model: 'acme-think',
+      reasoningEffort: ReasoningEffortId('high'),
+      messages: [createUserMessage({ content: [{ type: 'text', text: 'think' }], source: { kind: 'user' } })],
+    })
+    expect(first.message.content).toEqual([
+      { type: 'reasoning', text: 'deliberation' },
+      { type: 'text', text: 'hello' },
+    ])
+
+    // The second request is the whole point: what actually left the adapter.
+    await assemble(ctx, {
+      provider: 'acme-gateway',
+      model: 'acme-think',
+      reasoningEffort: ReasoningEffortId('high'),
+      messages: [
+        createUserMessage({ content: [{ type: 'text', text: 'think' }], source: { kind: 'user' } }),
+        first.message,
+        createUserMessage({ content: [{ type: 'text', text: 'again' }], source: { kind: 'user' } }),
+      ],
+    })
+    const replay = (server.requests[1] as { messages: Record<string, unknown>[] }).messages
+      .find(message => message['role'] === 'assistant')
+    expect(replay).toMatchObject({ reasoning_content: 'deliberation' })
+    expect(replay).not.toHaveProperty('reasoning_details')
+  })
+
+  it('leaves the recorded signature alone when no replay field is declared', async () => {
+    vi.stubEnv('PI_TEST_KEY', 'test-key')
+    const reasoningEvents = [
+      '{"choices":[{"delta":{"role":"assistant"},"index":0,"finish_reason":null}]}',
+      '{"choices":[{"delta":{"reasoning":"deliberation","reasoning_details":[{"type":"reasoning.text","text":"deliberation","format":"unknown","index":0}]},"index":0,"finish_reason":null}]}',
+      '{"choices":[{"delta":{"content":"hello"},"index":0,"finish_reason":null}]}',
+      '{"choices":[{"delta":{},"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}',
+      '[DONE]',
+    ]
+    const server = await mockServer([{ events: reasoningEvents }, { events: textEvents }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'acme-gateway': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'openai-completions',
+          baseURL: `${server.url}/v1`,
+          models: [{
+            id: 'acme-think',
+            contextWindow: 65_536,
+            maxTokens: 4096,
+            reasoningEfforts: { off: null, high: 'high' },
+          }],
+        },
+      },
+    })
+
+    const first = await assemble(ctx, {
+      provider: 'acme-gateway',
+      model: 'acme-think',
+      reasoningEffort: ReasoningEffortId('high'),
+      messages: [createUserMessage({ content: [{ type: 'text', text: 'think' }], source: { kind: 'user' } })],
+    })
+    await assemble(ctx, {
+      provider: 'acme-gateway',
+      model: 'acme-think',
+      reasoningEffort: ReasoningEffortId('high'),
+      messages: [
+        createUserMessage({ content: [{ type: 'text', text: 'think' }], source: { kind: 'user' } }),
+        first.message,
+        createUserMessage({ content: [{ type: 'text', text: 'again' }], source: { kind: 'user' } }),
+      ],
+    })
+    // Routes that did not opt in keep today's behavior exactly.
+    const replay = (server.requests[1] as { messages: Record<string, unknown>[] }).messages
+      .find(message => message['role'] === 'assistant')
+    expect(replay).toHaveProperty('reasoning_details')
+    expect(replay).not.toHaveProperty('reasoning_content')
+  })
+
   it('keeps the system role on a declared route whose gateway rejects the developer one', async () => {
     vi.stubEnv('PI_TEST_KEY', 'test-key')
     const server = await mockServer([{ events: textEvents }, { events: textEvents }])

@@ -27,6 +27,7 @@ import {
   CHAT_TEMPLATE_VARS,
   MAX_TOKENS_FIELDS,
   MODALITIES,
+  PI_AI_THOUGHT_REPLAY_FIELDS,
   PiAiCatalogError,
   resolveRouteModels,
   SUPPORTED_THINKING_FORMATS,
@@ -39,6 +40,7 @@ import type {
   PiAiModelOverride,
   PiAiModelProfile,
   PiAiReasoningEfforts,
+  PiAiThoughtReplayField,
   RouteCatalog,
 } from './catalog.ts'
 import { buildProvider, supportedProtocols } from './provider.ts'
@@ -216,6 +218,11 @@ export interface ResolvedPiAiProviderProfile
    * own, so a catalog capability must not appear here.
    */
   configuredMaxTokens: ReadonlyMap<string, number>
+  /**
+   * Request field each model's replayed reasoning must travel in, by model id,
+   * for endpoints that discard the provider's own replay spelling.
+   */
+  thoughtReplayFields: ReadonlyMap<string, PiAiThoughtReplayField>
 }
 
 /** Plugin configuration: the provider routes this instance owns. */
@@ -312,6 +319,9 @@ const modelFields = {
   // `{}`, and absent must stay distinguishable — it means "inherit the
   // installed catalog's capability", while `false` disables reasoning.
   reasoningEfforts: z.union([z.const(false), reasoningEfforts]),
+  // A closed vocabulary, so a misspelling is refused at the settings boundary
+  // instead of sending a field the endpoint ignores.
+  thoughtReplayField: z.union([...PI_AI_THOUGHT_REPLAY_FIELDS]),
   compat: compatProfile,
 }
 
@@ -501,6 +511,7 @@ export function resolveProfiles(
       ...rest.headers === undefined ? {} : { headers: { ...rest.headers } },
       ...rest.thinkingBudgets === undefined ? {} : { thinkingBudgets: { ...rest.thinkingBudgets } },
       configuredMaxTokens: catalog?.configuredMaxTokens ?? new Map(),
+      thoughtReplayFields: catalog?.thoughtReplayFields ?? new Map(),
       modelErrors: catalog?.modelErrors ?? new Map(),
       ...piProvider === undefined ? {} : { piProvider },
       ...catalogError === undefined ? {} : { catalogError },

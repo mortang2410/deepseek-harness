@@ -11,6 +11,7 @@
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import type { AssistantMessage as HarnessAssistantMessage, ModelMessageSource, ReplayEnvelope } from '@deepseek-ai/dsh-llm'
 import type { Api, AssistantMessage, ToolCall, Usage as PiUsage } from '@earendil-works/pi-ai'
+import type { PiAiThoughtReplayField } from './catalog.ts'
 
 /** Per-block half of the pi-ai replay envelope, one entry per content block. */
 export type PiAiReplayBlock =
@@ -148,13 +149,23 @@ function readReplayState(value: unknown): PiAiReplayState {
 }
 
 /** Convert provider-neutral blocks without trusting them as same-model replay. */
-function foreignAssistant(message: HarnessAssistantMessage): AssistantMessage {
+function foreignAssistant(
+  message: HarnessAssistantMessage,
+  thoughtReplayField?: PiAiThoughtReplayField,
+): AssistantMessage {
   const source = message.source
   const content: AssistantMessage['content'] = []
   for (const block of message.content) {
     switch (block.type) {
       case 'text': content.push({ type: 'text', text: block.text }); break
-      case 'reasoning': content.push({ type: 'thinking', thinking: block.text }); break
+      case 'reasoning': content.push({
+        type: 'thinking',
+        thinking: block.text,
+        // Foreign history carries no signature, so pi-ai writes no reasoning
+        // field at all on replay. Naming the endpoint's field here is what
+        // makes that reasoning travel instead of being dropped.
+        ...thoughtReplayField === undefined ? {} : { thinkingSignature: thoughtReplayField },
+      }); break
       case 'tool-call': content.push({
         type: 'toolCall',
         id: block.id,
@@ -183,7 +194,12 @@ function foreignAssistant(message: HarnessAssistantMessage): AssistantMessage {
 }
 
 /** Recombine durable Harness content with validated pi-ai replay metadata. */
-function replayedAssistant(message: HarnessAssistantMessage, source: ModelMessageSource, rawState: unknown): AssistantMessage {
+function replayedAssistant(
+  message: HarnessAssistantMessage,
+  source: ModelMessageSource,
+  rawState: unknown,
+  thoughtReplayField?: PiAiThoughtReplayField,
+): AssistantMessage {
   const state = readReplayState(rawState)
   if (state.response.provider !== source.provider) return invalidReplay('provider does not match assistant source')
   if (state.response.model !== source.model) return invalidReplay('model does not match assistant source')
@@ -200,7 +216,15 @@ function replayedAssistant(message: HarnessAssistantMessage, source: ModelMessag
       case 'reasoning': return {
         type: 'thinking',
         thinking: block.text,
-        ...replay.type === 'reasoning' && replay.thinkingSignature !== undefined ? { thinkingSignature: replay.thinkingSignature } : {},
+        // The endpoint's own field wins over the recorded signature: the
+        // signature describes what the endpoint streamed, and a gateway may
+        // stream one spelling while discarding it on the way back in. pi-ai
+        // treats a field-name signature as "send the thinking here", so this
+        // is what turns a replay the endpoint ignores into one it reads. The
+        // durable replay state keeps the original signature untouched.
+        ...thoughtReplayField !== undefined ? { thinkingSignature: thoughtReplayField }
+          : replay.type === 'reasoning' && replay.thinkingSignature !== undefined ? { thinkingSignature: replay.thinkingSignature }
+            : {},
         ...replay.type === 'reasoning' && replay.redacted !== undefined ? { redacted: replay.redacted } : {},
       }
       case 'tool-call': return {
@@ -240,18 +264,24 @@ function replayedAssistant(message: HarnessAssistantMessage, source: ModelMessag
  * @param message - model-produced assistant content with provider, model, and optional adapter-owned replay metadata.
  * @param onDegrade - called with the diagnostic reason when an unusable replay
  *   state falls back to provider-neutral conversion.
+ * @param thoughtReplayField - request field this model's endpoint reads prior
+ *   reasoning from, when it discards the spelling the provider streamed.
  * @returns a native pi-ai assistant message reconstructed from durable content.
  */
-export function toPiAssistant(message: HarnessAssistantMessage, onDegrade?: (reason: string) => void): AssistantMessage {
+export function toPiAssistant(
+  message: HarnessAssistantMessage,
+  onDegrade?: (reason: string) => void,
+  thoughtReplayField?: PiAiThoughtReplayField,
+): AssistantMessage {
   const source = message.source
-  if (source.replayState === undefined) return foreignAssistant(message)
+  if (source.replayState === undefined) return foreignAssistant(message, thoughtReplayField)
   try {
-    return replayedAssistant(message, source, source.replayState)
+    return replayedAssistant(message, source, source.replayState, thoughtReplayField)
   } catch (error: unknown) {
     /* v8 ignore next -- replayedAssistant throws only INVALID_REPLAY_STATE LlmErrors; the
        guard keeps a future non-replay failure loud instead of silently degrading it */
     if (!(error instanceof LlmError) || error.code !== 'INVALID_REPLAY_STATE') throw error
     onDegrade?.(error.message)
-    return foreignAssistant(message)
+    return foreignAssistant(message, thoughtReplayField)
   }
 }

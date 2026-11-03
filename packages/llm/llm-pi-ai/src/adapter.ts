@@ -366,8 +366,11 @@ export class PiAiAdapter extends LlmAdapter {
       const onReplayDegrade = (reason: string): void => {
         this.config.onReplayDegrade?.({ provider: options.provider, model: options.model, reason })
       }
+      // What the endpoint reads, when the route named a field and the endpoint
+      // is one whose reasoning travels in a request field at all.
+      const thoughtReplayField = profile.thoughtReplayFields.get(model.id)
       const context = attachments === undefined
-        ? toPiContext(options, undefined, onReplayDegrade)
+        ? toPiContext(options, undefined, onReplayDegrade, thoughtReplayField)
         : await toPiContext({ ...options, signal: watchdog.signal }, {
           attachments,
           resolveImageAccess: ref => this.config.resolveImageAccess?.(attachments, ref),
@@ -376,7 +379,7 @@ export class PiAiAdapter extends LlmAdapter {
             maxPixels: profile.requestImagePixelBudget,
             maxBytes: profile.requestImageMaxBytes,
           },
-        }, onReplayDegrade)
+        }, onReplayDegrade, thoughtReplayField)
       const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
