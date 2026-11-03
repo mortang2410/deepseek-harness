@@ -12,6 +12,7 @@ import { AssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-s
 import { normalizeContext } from '@earendil-works/pi-ai/utils/transcript'
 import type { Api, Model, OpenAICompletionsCompat, Provider } from '@earendil-works/pi-ai'
 import { resolveProfiles } from '../src/config.ts'
+import { resolveRouteModels } from '../src/catalog.ts'
 import { createModels, createProvider, getSupportedThinkingLevels } from '../src/models.ts'
 import { buildProvider, supportedProtocols } from '../src/provider.ts'
 import { assemble } from './assemble.ts'
@@ -296,6 +297,11 @@ describe('hand-declared providers', () => {
     )
     expect(declare({ id: 'as-text', thoughtReplayField: 'reasoning_content', compat: { requiresThinkingAsText: true } }))
       .toThrow(/requiresThinkingAsText, which sends thinking inside content/)
+    // The switch may also arrive from the route, which merges under the model's
+    // own compat; the refusal has to read the effective layer either way.
+    expect(declare({ id: 'inherits-text-mode', thoughtReplayField: 'reasoning_content' },
+      { compat: { requiresThinkingAsText: true } }))
+      .toThrow(/requiresThinkingAsText, which sends thinking inside content/)
 
     // A route's own `api` overrides a model's, so the refusal has to be driven
     // by a catalog entry whose protocol the route does not repoint: that is the
@@ -305,6 +311,29 @@ describe('hand-declared providers', () => {
     expect(() => resolveProfiles({
       anthropic: { modelOverrides: { [vision.id]: { thoughtReplayField: 'reasoning_content' } } },
     })).toThrow(/its api is "anthropic-messages"/)
+  })
+
+  it('leaves a withheld model unvalidated without letting it reach a request', () => {
+    // The refusal loop skips a model absent from the serviceable set, so the
+    // safety of that skip matters. A stored read retains a duplicate as a
+    // diagnostic instead of failing the load, which leaves the field
+    // unvalidated; the diagnostic is what keeps the model uncallable, because
+    // the adapter raises every modelErrors entry as INVALID_CONFIG before it
+    // builds a request.
+    const catalog = resolveRouteModels({
+      provider: 'acme-gateway',
+      api: 'openai-completions',
+      baseURL: 'https://acme.test',
+      models: [
+        { id: 'dup', thoughtReplayField: 'reasoning_content' },
+        { id: 'dup', thoughtReplayField: 'reasoning_content' },
+      ],
+      defaultContextWindow: 1024,
+      defaultMaxTokens: 128,
+      defaultInput: ['text'],
+    }, 'deferred')
+    expect(catalog.modelErrors.has('dup')).toBe(true)
+    expect(catalog.models).toHaveLength(0)
   })
 
   it('rejects a model the route cannot identify', () => {
