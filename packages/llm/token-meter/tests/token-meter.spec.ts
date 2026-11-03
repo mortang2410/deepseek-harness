@@ -139,7 +139,7 @@ function expectSurfaceTotal(measurement: TokenMeasurement): void {
     .toBe(measurement.surfaceTokens)
 }
 
-/** One surface node the reasoning history keeps priced after its anchoring call. */
+/** Seq references for a replacement range over the reasoning history's surface nodes. */
 interface ReasoningHistorySurface {
   /** Seq of the reasoning-bearing assistant answer: the replacement start. */
   readonly reasoningAssistant: SessionSeqType
