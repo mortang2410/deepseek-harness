@@ -129,6 +129,38 @@ arithmetic) and the `bounded transcript window` block in
 unrelated packages (session-controller tests, remote-mock tests and others);
 the `ui-chat` package itself typechecks clean.
 
+## Release line: 0.2.0-rc.2 port
+
+The profile's plugins pin 0.2.0-rc.2, and the 0.2.2-rc.1 loader disables them, so
+the build that serves the live GUI comes from the fork's
+`local/transcript-window-0.2.0` branch, a worktree at
+`/home/wilder/git-repos/deepseek-harness-020` based on tag `dsh-v0.2.0-rc.2`.
+There the transcript is still the single-file `ChatView`: the window projects the
+RenderEntry list inside `ChatNodeList` (leading entries, one fold row, retained
+suffix) and a Turn process group resolves its Turn from the group snapshot's own
+`turn` value.
+
+Two commits:
+
+- `3de5b7ad85` ports the window itself.
+- `33eae9c54b` fixes three defects an independent review found in it: group Turns
+  resolved through a member node, so most entries stayed outside the budget; rows
+  with no Turn of their own treated as leading rows, with the same effect; and a
+  rail jump to a loaded but folded Turn landing on a newer Turn. Rows now inherit
+  the Turn they follow, navigation widens the budget through `revealFoldedTurn`
+  and lands the jump on the commit that seats the Turn, and revealing from the
+  fold row compensates the height that enters above the reader.
+
+Verification at `33eae9c54b`: `vitest run packages/client/ui-chat/tests` reports 44
+files and 627 tests, `tsc -p packages/client/ui-chat/tsconfig.json` exits 0,
+`pnpm run build:lib:client` exits 0, and `packages/client/ui-chat/lib/client.js`
+carries the fold marker.
+
+Browser measurement on a spare host serving that build with the live profile and
+a copy of a real session: mounted seats plateau at 765 while the fold row's Turn
+count grows 3, 7, 10, 11, 13, 14 and 15 as older pages load, and a rail jump to
+folded Turn 156 lands at Turn 155/156 instead of Turn 162.
+
 ## Updating from upstream
 
 1. `git fetch upstream && git rebase upstream/master` on `local/transcript-window`.
