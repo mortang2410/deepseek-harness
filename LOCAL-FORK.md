@@ -36,6 +36,34 @@ A plugin cannot fix this: the loaded event window lives in the session
 controller and the seats stay mounted, so only the core chat view can unmount
 them.
 
+### Measured on this fork
+
+Same session, same host hardware, same probe: this checkout served on a spare
+port, headless Chrome on the Mac, the app's own "load earlier" control pressed
+30 times, retained heap sampled after a forced collection.
+
+| Pages loaded | JS heap | Attached elements | Chat nodes | Folded Turns |
+| --- | --- | --- | --- | --- |
+| 0 | 45.6 MB | 9,768 | 416 | 0 |
+| 2 | 71.3 MB | 20,143 | 927 | 0 |
+| 8 | 92.3 MB | 20,143 | 927 | 16 |
+| 11 | 106.0 MB | 20,143 | 927 | 23 |
+| 19 | 127.3 MB | 20,143 | 927 | 43 |
+| 27 | 160.0 MB | 20,143 | 927 | 64 |
+| 30 | 175.6 MB | 20,143 | 927 | 70 |
+
+The mounted tree stops growing after the second page: elements and chat nodes
+stay at 20,143 and 927 while 70 Turns and 1,019 entries fold behind one row.
+The unpatched client reached 62,999 elements at the same 30 pages.
+
+Heap is a different story. It still climbs about 4.3 MB per page from open to
+page 30 (3.7 MB between page 2 and page 30) against the unpatched 5.7 MB per
+page, so the fork removes roughly a quarter of the growth and none of the
+linear law. Elements and rendered text stay flat, so the growth is not the
+mounted rows; the uncompressed entry objects the session keeps for folded
+history are the remaining suspect, and a heap-snapshot diff between two page
+loads is the probe that would name the retainer.
+
 Upstream status when this fork was made: the defect is reported and unfixed.
 [#4900](https://github.com/deepseek-ai/deepseek-harness/discussions/4900) (open
 since 2026-08-28, unanswered),
