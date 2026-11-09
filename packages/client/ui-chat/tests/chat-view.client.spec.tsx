@@ -4767,3 +4767,74 @@ it('does not infer menu targets from links or data attributes inside a plugin fl
   expect(custom).toHaveBeenCalledOnce()
   expect(h.props.resolveFilePath).not.toHaveBeenCalled()
 })
+
+
+/** `turns` Turns of `rows` assistant rows each, newest Turn last. */
+function manyTurns(turns: number, rows: number): ConversationNode[] {
+  const nodes: ConversationNode[] = []
+  for (let turn = 1; turn <= turns; turn += 1) {
+    for (let row = 1; row <= rows; row += 1) {
+      nodes.push(
+        assistant(turn * 100 + row, `t${String(turn)}r${String(row)}`, turn, row) as unknown as ConversationNode,
+      )
+    }
+  }
+  return nodes
+}
+
+/** Seats the Chat flow currently mounts: one per seated entry. */
+function mountedSeatKeys(container: HTMLElement): string[] {
+  return [...container.querySelectorAll<HTMLElement>('[data-chat-flow-key]')]
+    .map(row => row.dataset.chatFlowKey!)
+}
+
+describe('bounded transcript window', () => {
+  it('bounds the mounted transcript to the newest Turns and one fold row', () => {
+    const h = makeHarness({ nodes: manyTurns(12, 6) })
+    const view = render(<h.ChatView {...h.props} />)
+    const seats = mountedSeatKeys(view.container)
+    const fold = view.container.querySelector<HTMLElement>('[data-transcript-fold-turns]')
+
+    expect(fold).not.toBeNull()
+    expect(fold!.dataset.transcriptFoldTurns).toBe('7')
+    expect(fold!.textContent).toContain('更早的 7 轮已折叠')
+    // Mounting is bounded well below the whole loaded transcript: the seven
+    // folded Turns' 42 rows are one row's worth of DOM.
+    expect(seats.length).toBeGreaterThan(0)
+    expect(seats.length).toBeLessThan(12 * 6)
+    // 7 Turns x 6 rows plus each Turn's own tail entry.
+    expect(Number(fold!.dataset.transcriptFoldEntries)).toBe(49)
+  })
+
+  it('keeps the mounted row count independent of how long the Session ran', () => {
+    const short = makeHarness({ nodes: manyTurns(12, 2) })
+    const shortMounted = mountedSeatKeys(render(<short.ChatView {...short.props} />).container).length
+
+    const long = makeHarness({ nodes: manyTurns(40, 2) })
+    const longView = render(<long.ChatView {...long.props} />)
+    const longMounted = mountedSeatKeys(longView.container).length
+
+    expect(shortMounted).toBeGreaterThan(0)
+    // 40 Turns mount exactly what 12 Turns mount: the surplus never lands in
+    // the tree, it is reported by the fold row.
+    expect(longMounted).toBe(shortMounted)
+    expect(longMounted).toBeLessThan(40 * 2)
+    expect(longView.container.querySelector('[data-transcript-fold-turns]')!.getAttribute('data-transcript-fold-turns'))
+      .toBe('35')
+  })
+
+  it('grows the window by one page when the reader asks for the folded Turns', () => {
+    const h = makeHarness({ nodes: manyTurns(12, 1) })
+    const view = render(<h.ChatView {...h.props} />)
+    const before = mountedSeatKeys(view.container).length
+    expect(before).toBeLessThan(12)
+
+    fireEvent.click(view.getByRole('button', { name: /更早的 7 轮已折叠/ }))
+    // The reveal is a render decision: the next 5 Turns keep their seats, the
+    // remainder still folds into one row, and no history page is requested.
+    expect(mountedSeatKeys(view.container).length).toBeGreaterThan(before)
+    expect(view.container.querySelector('[data-transcript-fold-turns]')!.getAttribute('data-transcript-fold-turns'))
+      .toBe('2')
+    expect(h.loadThrough).not.toHaveBeenCalled()
+  })
+})

@@ -12,6 +12,11 @@ export interface ChatNavigationInput extends Pick<ChatViewSlotProps, 'loadOlder'
   readonly firstSeq: ChatNode['anchorSeq'] | null
   readonly hasMore: boolean
   readonly loadingOlder: boolean
+  /**
+   * Raise the render budget so a loaded but unseated Turn's row exists again.
+   * Returns whether the budget grew, so a jump can wait for the next commit.
+   */
+  readonly revealTurn?: ((turn: number) => boolean) | undefined
 }
 
 interface TurnJump {
@@ -26,6 +31,8 @@ interface TurnJump {
 export class ChatNavigation {
   private jump: TurnJump | null = null
   private settleFrame: number | null = null
+  /** A loaded Turn whose row the render budget has not seated yet. */
+  private pendingReveal: number | null = null
 
   constructor(
     private readonly viewport: ChatViewport,
@@ -59,7 +66,23 @@ export class ChatNavigation {
   private clearTask(): void {
     this.cancelFrame()
     this.jump = null
+    this.pendingReveal = null
     this.viewport.stopPreserving()
+  }
+
+  /**
+   * Land a selection held while its Turn was outside the render budget.
+   * @returns whether the pending reveal owns the current commit.
+   */
+  private settleReveal(): boolean {
+    const turn = this.pendingReveal
+    if (turn === null) return false
+    const landing = this.viewport.scrollToTurn(turn)
+    if (landing === null) return true
+    this.pendingReveal = null
+    this.onBusyTurn(null)
+    this.reading.acceptNavigation(landing)
+    return true
   }
 
   /**
@@ -70,7 +93,17 @@ export class ChatNavigation {
     if (item.anchor.kind === 'loaded') {
       this.cancel()
       const landing = this.viewport.scrollToTurn(item.turn)
-      if (landing === null) return
+      if (landing === null) {
+        // Loaded but outside the render budget: raise the budget and hold the
+        // selection as a pending reveal, so the landing correction still runs
+        // instead of the click silently doing nothing.
+        if (this.input.revealTurn?.(item.turn) === true) {
+          this.pendingReveal = item.turn
+          this.onBusyTurn(item.turn)
+          this.viewport.beginPreserving()
+        }
+        return
+      }
       this.reading.acceptNavigation(landing)
       if (this.input.loadingOlder) this.viewport.beginPreserving(landing.position)
       return
@@ -112,6 +145,7 @@ export class ChatNavigation {
    * @returns whether the retained anchor handled the layout change.
    */
   contentCommitted(): boolean {
+    if (this.settleReveal()) return true
     if (!this.viewport.preserving || this.reading.pending) return false
     if (this.landJump(false)) return true
     const landing = this.viewport.preserve()
@@ -129,6 +163,7 @@ export class ChatNavigation {
 
   /** Land, retry, or complete the current jump against the committed window. */
   reconcile(): void {
+    if (this.settleReveal()) return
     const jump = this.jump
     if (jump === null || this.reading.pending) return
     if (jump.phase === 'loading') {
@@ -137,6 +172,9 @@ export class ChatNavigation {
     }
     if (this.input.loadingOlder) return
     if (this.landJump(true)) return
+    // The Turn is loaded but outside the render budget: raise it and retry on
+    // the commit that seats the row, rather than jumping to a neighbour.
+    if (this.input.revealTurn?.(jump.turn) === true) return
     const uncovered = this.input.firstSeq === null || this.input.firstSeq > jump.seq
     if (uncovered && this.input.hasMore && jump.repageHead !== this.input.firstSeq) {
       jump.repageHead = this.input.firstSeq

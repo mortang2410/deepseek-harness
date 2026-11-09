@@ -18,6 +18,7 @@ import type {
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { ConnectionStateSource } from '@deepseek-ai/dsh-client-connection/client'
 import type { FileDragActions, MarkdownFileMentions, MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { TranscriptFoldGroup } from '../chat/transcript-window.ts'
 import type { ContextMenuTriggerProps } from '@deepseek-ai/dsh-client-ui-context-menu/client'
 import type { ChatKey } from '../locale.ts'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -366,6 +367,25 @@ export type ChatFlowDataInjected = Pick<ChatViewInjected, 'keyedHooks'> & {
   }
 }
 
+/**
+ * Bounded render window for the loaded flow.
+ *
+ * The Chat view projects its loaded entries onto a fixed Turn budget, so a long
+ * Session seats a bounded suffix plus one fold row instead of every loaded row.
+ */
+export interface TranscriptFlowWindow {
+  /** Turn-less entries ahead of the window head (session-scoped sections). */
+  readonly leading: readonly RenderEntry[]
+  /** Entries inside the render budget, in loaded order: the contiguous suffix. */
+  readonly retained: readonly RenderEntry[]
+  /** Turns outside the budget, or null when every loaded Turn is seated. */
+  readonly fold: TranscriptFoldGroup | null
+  /** Reveal one more page of Turns; at the cap this asks the history pager. */
+  readonly reveal: () => void
+  /** A reveal is waiting on a history page. */
+  readonly busy: boolean
+}
+
 /** Ordered rows and reconciled local echoes rendered inside one Chat viewport. */
 export interface ChatFlowOwnerProps extends Pick<ChatNodeOwnerProps,
   'cwd' | 'openFile' | 'inspectCall' | 'forkAt' | 'loadImage'> {
@@ -373,6 +393,8 @@ export interface ChatFlowOwnerProps extends Pick<ChatNodeOwnerProps,
   readonly pendingInputs: readonly (PendingSubmission | InboxState['next-step'][number])[]
   readonly lastInputTurn: number | undefined
   readonly deferCollapse: boolean
+  /** Absent when the whole loaded window fits the render budget. */
+  readonly transcriptWindow?: TranscriptFlowWindow
 }
 
 /** Full props of the Chat-owned flow renderer. */

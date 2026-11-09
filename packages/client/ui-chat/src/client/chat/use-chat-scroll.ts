@@ -48,12 +48,13 @@ export function useChatScroll(input: ChatScrollInput): ChatScrollState {
   const {
     ready, order, firstSeq, lastKey, lastIsUser, steeringId, submissionId, submissionSteers, running,
     deferCompletedTurns, loadedTurns, chatScroll, hasMore, loadingOlder, loadOlder, loadThrough, transcriptView,
+    revealTurn,
   } = input
   const { viewport, listRef, columnRef } = useChatViewport()
   const { reading, state } = useChatReading(viewport, chatScroll, loadedTurns.at(-1)?.turn ?? null)
   const navigationInput = useMemo(() => ({
-    firstSeq, loadingOlder, hasMore, loadOlder, loadThrough,
-  }), [firstSeq, loadingOlder, hasMore, loadOlder, loadThrough])
+    firstSeq, loadingOlder, hasMore, loadOlder, loadThrough, revealTurn,
+  }), [firstSeq, loadingOlder, hasMore, loadOlder, loadThrough, revealTurn])
   const { navigation, busyTurn } = useChatNavigation(viewport, reading, navigationInput)
   const content = useRef<{ input: ChatScrollInput; applied: ChatScrollInput | null; opened: boolean }>({
     input, applied: null, opened: false,

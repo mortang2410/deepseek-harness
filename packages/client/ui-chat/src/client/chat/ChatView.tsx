@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
-  NodeKey, RenderEntry,
+  GroupKey, NodeKey, RenderEntry,
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { InboxState } from '@deepseek-ai/dsh-agent/types'
 import type { PendingSubmission } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -11,9 +11,15 @@ import {
   Button, IconChevronDownOutlineRegular, MarkdownDelegateProvider, Modal, type MarkdownMenuTarget,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { isAtOrOutside } from '../contract/group-tree.ts'
-import type { ChatFlowHookContext, ChatViewSlotProps, OpenFileOptions } from '../contract/slots.ts'
+import type { ChatNode } from '../contract/chat-nodes.ts'
+import type {
+  ChatFlowHookContext, ChatViewSlotProps, OpenFileOptions, TranscriptFlowWindow,
+} from '../contract/slots.ts'
 import type { ChatSnapshot } from '../contract/snapshot.ts'
 import { TurnNavigator } from './TurnNavigator.tsx'
+import {
+  DEFAULT_WINDOW_TURNS, TRANSCRIPT_WINDOW_PAGE_CAP, pagesToRevealTurn, projectTranscriptWindow,
+} from './transcript-window.ts'
 import { mergeTurnRailItems } from './turn-rail-items.ts'
 import { useTextInteraction } from './text-interaction.ts'
 import { useChatScroll } from './use-chat-scroll.ts'
@@ -51,6 +57,13 @@ function observedInputs(
 
 type PendingInput = PendingSubmission | InboxState['next-step'][number]
 
+/** Turn owning a loaded node, or null for a session-scoped row. */
+function turnOfNode(node: { readonly location: ChatNode['location'] } | undefined): number | null {
+  const location = node?.location
+  if (location?.kind === 'turn' || location?.kind === 'step') return location.turn.turn
+  return null
+}
+
 /** How long fold transitions stay enabled after a Turn stops running. */
 const MOTION_TAIL_MS = 800
 
@@ -81,6 +94,48 @@ export function ChatView({
   const entries = useMemo<readonly RenderEntry[]>(() => groupedEntries
     ?? order.map(key => ({ kind: 'node', key: key as NodeKey })), [groupedEntries, order])
   const nodeStore = useChat(s => s.nodes)
+  // Grouped entries (Turn processes) carry their Turn through their members, so
+  // the window resolves an entry's Turn from the node store either way.
+  const groupedView = useConversation(snapshot => snapshot.views.grouped('chat'))
+  /**
+   * Render budget in Turns. The fold row raises it one page at a time up to a
+   * hard cap, so even a fully revealed transcript stays inside a fixed mount
+   * budget.
+   */
+  const [windowPages, setWindowPages] = useState(1)
+  const windowTurns = DEFAULT_WINDOW_TURNS * windowPages
+  const turnOfEntry = useCallback((entry: RenderEntry): number | null => {
+    if (entry.kind === 'node') return turnOfNode(nodeStore.get(entry.key))
+    const member = groupedView?.groupSource(entry.key as GroupKey).getSnapshot()?.members[0]
+    return member === undefined ? null : turnOfNode(nodeStore.get(member.key))
+  }, [groupedView, nodeStore])
+  /**
+   * Bounded transcript window: the newest `windowTurns` Turns keep their own
+   * seats and every older Turn becomes one fold row, so the mounted row count
+   * stops growing with the loaded history.
+   */
+  const transcriptWindow = useMemo(
+    () => projectTranscriptWindow(entries, turnOfEntry, windowTurns),
+    [entries, turnOfEntry, windowTurns],
+  )
+  /** Raise the budget by one page; the folded Turns are already loaded. */
+  const revealFold = useCallback(() => {
+    setWindowPages(pages => Math.min(TRANSCRIPT_WINDOW_PAGE_CAP, pages + 1))
+  }, [])
+  /** Raise the budget to the page holding `turn`, so a jump can land. */
+  const revealThrough = useCallback((turn: number): boolean => {
+    const target = pagesToRevealTurn(transcriptWindow.turns, turn)
+    if (target <= windowPages) return false
+    setWindowPages(target)
+    return true
+  }, [transcriptWindow.turns, windowPages])
+  /**
+   * Latest-ref for the jump paths: they read the current projection without
+   * taking its per-append identity as a dependency, which would re-settle a jump
+   * on every paged commit and clear an in-flight busy mark.
+   */
+  const revealThroughRef = useRef(revealThrough)
+  revealThroughRef.current = revealThrough
   const deferCompletedTurns = usePresentation(policy => policy.collapseTiming === 'next-input')
   const transcriptView = usePresentation(policy => policy.mode)
   // The rail's items are accumulated in the Chat snapshot, so this selector is
@@ -208,11 +263,24 @@ export function ChatView({
     submissionSteers: visibleSubmissions.at(-1)?.placement === 'steering',
     loadedTurns: turnNavigationItems,
     transcriptView,
+    revealTurn: (turn: number) => revealThroughRef.current(turn),
   })
   const interactionSurfaceRef = useRef<HTMLDivElement>(null)
   const interactionIds = useInteractionIds(ids => ids)
   const textInteraction = useTextInteraction(scroll.columnRef, interactionSurfaceRef, dispatchInteraction, interactionIds)
   const flowContext = useMemo<ChatFlowHookContext>(() => ({ motion: scroll.motion }), [scroll.motion])
+  // What the flow may seat. Absent while the whole loaded window fits the
+  // budget, so an ordinary short Session renders exactly as it did before.
+  const foldAtCap = windowPages >= TRANSCRIPT_WINDOW_PAGE_CAP
+  const flowWindow = useMemo<TranscriptFlowWindow | undefined>(() => (
+    transcriptWindow.fold === null ? undefined : {
+      leading: transcriptWindow.leading,
+      retained: transcriptWindow.retained,
+      fold: transcriptWindow.fold,
+      reveal: foldAtCap ? scroll.loadEarlier : revealFold,
+      busy: foldAtCap && loadingOlder,
+    }
+  ), [transcriptWindow, foldAtCap, scroll.loadEarlier, revealFold, loadingOlder])
 
   return (
     <div className={css.frame}>
@@ -252,6 +320,7 @@ export function ChatView({
               {renderSlot('conversation.chat.flow', {
                 entries, pendingInputs, lastInputTurn, deferCollapse,
                 cwd, openFile: requestOpenFile, inspectCall, forkAt, loadImage,
+                ...(flowWindow === undefined ? {} : { transcriptWindow: flowWindow }),
               }, { hookContext: flowContext })}
             </MarkdownDelegateProvider>
             <div ref={interactionSurfaceRef} className={css.textInteraction} data-text-interaction-surface=""
