@@ -3,7 +3,7 @@
 
 import { memo, useCallback, useMemo, useRef, useState, type ComponentProps } from 'react'
 import type {
-  NodeKey, RenderEntry, RenderMessageImages,
+  GroupKey, NodeKey, RenderEntry, RenderMessageImages,
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { InboxState } from '@deepseek-ai/dsh-agent/types'
 import type { PendingSubmission } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -11,6 +11,7 @@ import {
   Button, IconChevronDownOutlineRegular, MarkdownDelegateProvider, Modal,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatViewSlotProps, OpenFileOptions } from '../contract/slots.ts'
+import type { ChatNode } from '../contract/chat-nodes.ts'
 import type { ChatSnapshot } from '../contract/snapshot.ts'
 import { PendingSteeringBubble, PendingSubmissionBubble } from './MessageItem.tsx'
 import { ChatNodeSeat } from './ChatNodeSeat.tsx'
@@ -20,6 +21,10 @@ import { assertNever } from '@deepseek-ai/dsh-util-values'
 import { TurnNavigator } from './TurnNavigator.tsx'
 import { RunningStatus } from './RunningStatus.tsx'
 import { mergeTurnRailItems } from './turn-rail-items.ts'
+import {
+  DEFAULT_WINDOW_TURNS, TRANSCRIPT_WINDOW_PAGE_CAP, projectTranscriptWindow, type TranscriptFoldGroup,
+} from './transcript-window.ts'
+import { TranscriptFoldRow } from './TranscriptFoldRow.tsx'
 import { useChatScroll } from './use-chat-scroll.ts'
 import { fileMediaUrl, resolveWorkspacePath } from '@deepseek-ai/dsh-util-workspace-path'
 import css from './ChatView.module.css'
@@ -56,15 +61,38 @@ function observedInputs(
 
 type PendingInput = PendingSubmission | InboxState['next-step'][number]
 
+/** Turn owning a loaded node, or null for a session-scoped row. */
+function turnOfNode(node: { readonly location: ChatNode['location'] } | undefined): number | null {
+  const location = node?.location
+  if (location?.kind === 'turn' || location?.kind === 'step') return location.turn.turn
+  return null
+}
+
+/** Projection key for a render entry; the kind prefix keeps node and group keys apart. */
+function entryKey(entry: RenderEntry): string {
+  return `${entry.kind}:${entry.key}`
+}
+
+/** Entries the bounded window seats, resolved back from the projection's keys. */
+interface SeatedTranscriptWindow {
+  readonly leading: readonly RenderEntry[]
+  readonly fold: TranscriptFoldGroup | null
+  readonly retained: readonly RenderEntry[]
+}
+
 type ChatNodeListProps = Omit<ComponentProps<typeof ChatNodeSeat>, 'nodeKey' | 'groupPart'> & {
-  readonly entries: readonly RenderEntry[]
+  readonly windowSeats: SeatedTranscriptWindow
+  readonly foldBusy: boolean
+  readonly onRevealFold: () => void
   readonly useChatGroup: ChatViewSlotProps['useChatGroup']
   readonly pendingInputs: readonly PendingInput[]
   readonly lastInputTurn: number | undefined
 }
 
-const ChatNodeList = memo(function ChatNodeList({ entries, useChatGroup, pendingInputs, lastInputTurn, ...seatProps }: ChatNodeListProps) {
-  const rows = entries.map((entry) => {
+const ChatNodeList = memo(function ChatNodeList({
+  windowSeats, foldBusy, onRevealFold, useChatGroup, pendingInputs, lastInputTurn, ...seatProps
+}: ChatNodeListProps) {
+  const seat = (entry: RenderEntry) => {
     switch (entry.kind) {
       case 'node':
         return <ChatNodeSeat {...seatProps} key={chatRenderKey(entry)} nodeKey={entry.key}
@@ -74,7 +102,17 @@ const ChatNodeList = memo(function ChatNodeList({ entries, useChatGroup, pending
       default:
         return assertNever(entry)
     }
-  })
+  }
+  // The window projection decides what is seated: leading session sections,
+  // one fold row for every Turn outside the budget, then the retained suffix.
+  const rows = [
+    ...windowSeats.leading.map(seat),
+    ...(windowSeats.fold === null ? [] : [
+      <TranscriptFoldRow key="transcript-fold-row" group={windowSeats.fold}
+        busy={foldBusy} onReveal={onRevealFold} t={seatProps.t} />,
+    ]),
+    ...windowSeats.retained.map(seat),
+  ]
   const pendingRows = pendingInputs.map(item => 'requestId' in item ? (
     <PendingSubmissionBubble key={item.requestId} submission={item}
       renderMessageImages={seatProps.renderMessageImages} t={seatProps.t} />
@@ -82,7 +120,7 @@ const ChatNodeList = memo(function ChatNodeList({ entries, useChatGroup, pending
     <PendingSteeringBubble key={item.id} content={item.content}
       renderMessageImages={seatProps.renderMessageImages} t={seatProps.t} />
   ))
-  const tail = entries.at(-1)
+  const tail = windowSeats.retained.at(-1)
   const node = tail?.kind === 'node' ? seatProps.nodeStore.get(tail.key) : undefined
   // An empty opening control follows one local transcript echo, never steering.
   // All rows share this keyed list so inserting the control keeps the echo mounted.
@@ -108,6 +146,51 @@ export function ChatView({
   const entries = useMemo<readonly RenderEntry[]>(() => groupedEntries
     ?? order.map(key => ({ kind: 'node', key: key as NodeKey })), [groupedEntries, order])
   const nodeStore = useChat(s => s.nodes)
+  // Grouped entries (Turn processes) carry their Turn through their first
+  // member, so the window resolves a Turn from the node store either way.
+  const groupedView = useConversation(snapshot => snapshot.views.grouped('chat'))
+  /**
+   * Render budget in Turns. The fold row raises it one page at a time up to a
+   * hard cap, so even a fully revealed transcript stays inside a fixed budget.
+   */
+  const [windowPages, setWindowPages] = useState(1)
+  const windowTurns = DEFAULT_WINDOW_TURNS * windowPages
+  const entriesByKey = useMemo(() => new Map(entries.map(entry => [entryKey(entry), entry])), [entries])
+  const turnOfEntry = useCallback((key: string): number | null => {
+    const entry = entriesByKey.get(key)
+    if (entry === undefined) return null
+    if (entry.kind === 'node') return turnOfNode(nodeStore.get(entry.key))
+    const member = groupedView?.groupSource(entry.key as GroupKey).getSnapshot()?.members[0]
+    return member === undefined ? null : turnOfNode(nodeStore.get(member.key))
+  }, [entriesByKey, groupedView, nodeStore])
+  /**
+   * Bounded transcript window: the newest Turns keep their own seats and every
+   * older Turn becomes one fold row, so the mounted row count stops growing
+   * with the loaded history.
+   */
+  const transcriptWindow = useMemo(
+    () => projectTranscriptWindow([...entriesByKey.keys()], turnOfEntry, windowTurns),
+    [entriesByKey, turnOfEntry, windowTurns],
+  )
+  /** Raise the budget by one page; the folded Turns are already loaded. */
+  const revealFold = useCallback(() => {
+    setWindowPages(pages => Math.min(TRANSCRIPT_WINDOW_PAGE_CAP, pages + 1))
+  }, [])
+  const windowSeats = useMemo<SeatedTranscriptWindow>(() => {
+    const seatsOf = (keys: readonly string[]): RenderEntry[] => {
+      const seated: RenderEntry[] = []
+      for (const key of keys) {
+        const entry = entriesByKey.get(key)
+        if (entry !== undefined) seated.push(entry)
+      }
+      return seated
+    }
+    return {
+      leading: seatsOf(transcriptWindow.leading),
+      fold: transcriptWindow.fold,
+      retained: seatsOf(transcriptWindow.retained),
+    }
+  }, [entriesByKey, transcriptWindow])
   // The rail's items are accumulated in the Chat snapshot, so this selector is
   // both the data and its change signal: the array identity moves only when a
   // Turn enters, leaves, or changes its preview.
@@ -255,7 +338,9 @@ export function ChatView({
             )}
             <MarkdownDelegateProvider openExternalLink={openExternalLink} openFile={requestOpenFile} fileImages={fileImages}>
               <ChatNodeList
-                entries={entries}
+                windowSeats={windowSeats}
+                foldBusy={windowPages >= TRANSCRIPT_WINDOW_PAGE_CAP && loadingOlder}
+                onRevealFold={windowPages >= TRANSCRIPT_WINDOW_PAGE_CAP ? scroll.loadEarlier : revealFold}
                 pendingInputs={pendingInputs}
                 lastInputTurn={lastInputTurn}
                 nodeStore={nodeStore}
