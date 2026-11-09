@@ -4002,6 +4002,25 @@ describe('ChatView', () => {
     }
   })
 
+  it('mounts only the newest Turns and reveals folded ones from the fold row', () => {
+    // The window is a render decision, so only a mounted ChatView can prove it:
+    // a projection unit test stays green even when the view stops using it.
+    const nodes = Array.from({ length: 12 }, (_, index) => userInTurn(index + 1, `turn ${String(index + 1)}`, index + 1))
+    const h = makeHarness({ nodes })
+    const view = render(<h.ChatView {...h.props} />)
+    const foldElement = () => view.container.querySelector('[data-transcript-fold-turns]')
+    const foldTurns = () => Number(/(\d+)/.exec(foldElement()?.textContent ?? '')?.[1] ?? 0)
+    const mountedRows = () => view.container.querySelectorAll('[data-chat-anchor-key]').length
+    expect(foldElement()).not.toBeNull()
+    // Twelve Turns against a five-Turn budget: seven are folded, not mounted.
+    expect(foldTurns()).toBe(7)
+    const before = mountedRows()
+    fireEvent.click(foldElement()!.querySelector('button') ?? foldElement()!)
+    // One reveal page seats five more Turns and leaves two folded.
+    expect(foldTurns()).toBe(2)
+    expect(mountedRows()).toBeGreaterThan(before)
+  })
+
   it('paging button loads older and shows its busy label', () => {
     const h = makeHarness({ nodes: [user(5, 'later')] }, { hasMore: true })
     const view = render(<h.ChatView {...h.props} />)
