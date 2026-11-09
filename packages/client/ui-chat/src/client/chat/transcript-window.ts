@@ -74,9 +74,11 @@ export function pagesToRevealTurn(
 /**
  * Project the loaded order onto a bounded Turn window.
  *
- * Rows that resolve to no Turn (session-section nodes at the very head) always
- * stay: they are a fixed handful of leading rows, not a per-Turn cost, and
- * dropping the System-prompt row would change what the transcript shows.
+ * Rows that resolve to no Turn inherit the Turn they follow, so a Turn's tool
+ * steps and trailing input rows fold with that Turn instead of staying mounted
+ * outside the budget. Only rows before the first Turn are session-scoped and
+ * always stay: they are a fixed handful, and dropping the System-prompt row
+ * would change what the transcript shows.
  *
  * @param order - loaded Conversation Node keys in render order.
  * @param turnOf - resolves one node key to its owning Turn, or null.
@@ -89,9 +91,17 @@ export function projectTranscriptWindow(
   windowTurns: number = DEFAULT_WINDOW_TURNS,
 ): TranscriptWindow {
   const turnsSeen = new Set<number>()
+  // A row that carries no Turn of its own follows the Turn it sits in: tool
+  // steps and trailing input rows would otherwise all read as Turn-less
+  // "leading" rows and stay mounted outside the budget, which is the cost this
+  // window exists to remove.
+  const effective: (number | null)[] = []
+  let carried: number | null = null
   for (const key of order) {
     const turn = turnOf(key)
-    if (turn !== null) turnsSeen.add(turn)
+    if (turn !== null) carried = turn
+    effective.push(carried)
+    if (carried !== null) turnsSeen.add(carried)
   }
   const budget = Number.isFinite(windowTurns) ? Math.max(0, Math.trunc(windowTurns)) : DEFAULT_WINDOW_TURNS
   // A zero budget must fold every Turn, so only a Session inside a positive
@@ -105,13 +115,9 @@ export function projectTranscriptWindow(
   // the sorted list; no second pass is needed to name them.
   const foldedTurns = turns.slice(0, turns.length - budget)
   const foldTurns = new Set(foldedTurns)
-  // A row that owns no Turn belongs to no folded Turn either; it stays only
-  // while it precedes the window head, so trailing Turn-less rows never get
-  // dropped between two seated Turns.
-  let head = order.findIndex((key) => {
-    const turn = turnOf(key)
-    return turn !== null && !foldTurns.has(turn)
-  })
+  // Rows before the first Turn are session-scoped and stay seated; from the
+  // first Turn on, every row inherits a Turn and folds with it.
+  let head = effective.findIndex(turn => turn !== null && !foldTurns.has(turn))
   if (head < 0) head = order.length
 
   const retained: string[] = []
@@ -124,7 +130,7 @@ export function projectTranscriptWindow(
       retained.push(key)
       continue
     }
-    if (turnOf(key) === null) leading.push(key)
+    if (effective[index] === null) leading.push(key)
     else nodeCount += 1
   }
   return {

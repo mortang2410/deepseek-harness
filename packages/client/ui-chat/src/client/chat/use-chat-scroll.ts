@@ -17,6 +17,8 @@ export interface ChatScrollInput extends ChatNavigationInput {
   readonly submissionId: string | null
   readonly running: boolean
   readonly loadedTurns: ReturnType<ChatSnapshot['navigation']['items']>
+  /** Widen the render window so a loaded but folded Turn can mount again. */
+  readonly revealFoldedTurn?: (turn: number) => boolean
 }
 
 interface ChatScrollState extends ChatReadingState {
@@ -26,6 +28,7 @@ interface ChatScrollState extends ChatReadingState {
   readonly navigateToTurn: ChatNavigation['navigateToTurn']
   readonly loadEarlier: ChatNavigation['loadEarlier']
   readonly returnToBottom: () => void
+  readonly revealIntoView: (turn: number) => boolean
 }
 
 /**
@@ -45,6 +48,7 @@ export function useChatScroll(input: ChatScrollInput): ChatScrollState {
     firstSeq, loadingOlder, hasMore, loadOlder, loadThrough,
   }), [firstSeq, loadingOlder, hasMore, loadOlder, loadThrough])
   const { navigation, busyTurn } = useChatNavigation(viewport, reading, navigationInput)
+  useLayoutEffect(() => { navigation.setFoldedHandler(input.revealFoldedTurn ?? null) }, [input.revealFoldedTurn, navigation])
   const content = useRef<{ input: ChatScrollInput; applied: ChatScrollInput | null; opened: boolean }>({
     input, applied: null, opened: false,
   })
@@ -129,10 +133,27 @@ export function useChatScroll(input: ChatScrollInput): ChatScrollState {
     reading.followTail()
   }, [navigation, reading])
 
+  /**
+   * Align a Turn that is already loaded and mounted, for callers that raise the
+   * render budget first. Returns false while the Turn has no mounted anchor, so
+   * the caller can retry after the next commit instead of landing elsewhere.
+   * @param turn - Turn to bring to the top of the scrollport.
+   * @returns whether the Turn had a mounted anchor to align.
+   */
+  const revealIntoView = useCallback((turn: number): boolean => {
+    const landing = viewport.scrollToTurn(turn)
+    if (landing === null) return false
+    // The jump this reveal was widening the window for is complete now.
+    navigation.cancel()
+    reading.acceptNavigation(landing)
+    return true
+  }, [navigation, reading, viewport])
+
   return {
     listRef, columnRef, ...state, busyTurn,
     navigateToTurn: navigation.navigateToTurn,
     loadEarlier: navigation.loadEarlier,
     returnToBottom,
+    revealIntoView,
   }
 }

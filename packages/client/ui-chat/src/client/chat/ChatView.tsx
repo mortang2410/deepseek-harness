@@ -1,7 +1,7 @@
 // An enclosing `[data-conversation-scroll]` owns scrolling when present;
 // otherwise this view owns it. Each row subscribes to one stable node key.
 
-import { memo, useCallback, useMemo, useRef, useState, type ComponentProps } from 'react'
+import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from 'react'
 import type {
   GroupKey, NodeKey, RenderEntry, RenderMessageImages,
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -20,9 +20,9 @@ import { chatRenderKey } from './render-entry.ts'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import { TurnNavigator } from './TurnNavigator.tsx'
 import { RunningStatus } from './RunningStatus.tsx'
-import { mergeTurnRailItems } from './turn-rail-items.ts'
+import { mergeTurnRailItems, type TurnRailItem } from './turn-rail-items.ts'
 import {
-  DEFAULT_WINDOW_TURNS, TRANSCRIPT_WINDOW_PAGE_CAP, projectTranscriptWindow, type TranscriptFoldGroup,
+  DEFAULT_WINDOW_TURNS, TRANSCRIPT_WINDOW_PAGE_CAP, pagesToRevealTurn, projectTranscriptWindow, type TranscriptFoldGroup,
 } from './transcript-window.ts'
 import { TranscriptFoldRow } from './TranscriptFoldRow.tsx'
 import { useChatScroll } from './use-chat-scroll.ts'
@@ -160,7 +160,14 @@ export function ChatView({
     const entry = entriesByKey.get(key)
     if (entry === undefined) return null
     if (entry.kind === 'node') return turnOfNode(nodeStore.get(entry.key))
-    const member = groupedView?.groupSource(entry.key as GroupKey).getSnapshot()?.members[0]
+    // A Turn process group states its Turn on the group data, which is the same
+    // source its seat renders from. Reading it through a member key misses
+    // whenever that member has no node entry, and the group then looked
+    // Turn-less and stayed mounted outside the budget.
+    const group = groupedView?.groupSource(entry.key as GroupKey).getSnapshot()
+    const turn = (group?.data as { readonly turn?: unknown } | undefined)?.turn
+    if (typeof turn === 'number') return turn
+    const member = group?.members[0]
     return member === undefined ? null : turnOfNode(nodeStore.get(member.key))
   }, [entriesByKey, groupedView, nodeStore])
   /**
@@ -172,10 +179,6 @@ export function ChatView({
     () => projectTranscriptWindow([...entriesByKey.keys()], turnOfEntry, windowTurns),
     [entriesByKey, turnOfEntry, windowTurns],
   )
-  /** Raise the budget by one page; the folded Turns are already loaded. */
-  const revealFold = useCallback(() => {
-    setWindowPages(pages => Math.min(TRANSCRIPT_WINDOW_PAGE_CAP, pages + 1))
-  }, [])
   const windowSeats = useMemo<SeatedTranscriptWindow>(() => {
     const seatsOf = (keys: readonly string[]): RenderEntry[] => {
       const seated: RenderEntry[] = []
@@ -300,6 +303,20 @@ export function ChatView({
   const latestSteering = pendingInputs.findLast(item => 'source' in item)
   const steeringId = latestSteering?.source.kind === 'user' && 'rpcId' in latestSteering.source
     ? latestSteering.source.rpcId : latestSteering?.id ?? null
+  /**
+   * A folded Turn has no mounted row, so the viewport anchor cannot find it and
+   * a rail jump would land on a newer Turn. Raising the budget makes it
+   * mountable; the layout effects below seat and align it once it is committed.
+   */
+  const [pendingReveal, setPendingReveal] = useState<number | null>(null)
+  const revealMetrics = useRef<{ scrollTop: number; scrollHeight: number } | null>(null)
+  /** Widen the budget until the loaded Turn can mount. False when it is not loaded. */
+  const revealTurn = useCallback((turn: number): boolean => {
+    if (!transcriptWindow.turns.includes(turn)) return false
+    setWindowPages(pages => Math.max(pages, pagesToRevealTurn(transcriptWindow.turns, turn)))
+    setPendingReveal(turn)
+    return true
+  }, [transcriptWindow.turns])
   const scroll = useChatScroll({
     ready: openState === 'open',
     order, firstSeq, lastKey, running, loadingOlder, hasMore, chatScroll, loadOlder, loadThrough,
@@ -307,7 +324,52 @@ export function ChatView({
     steeringId,
     submissionId: visibleSubmissions.at(-1)?.requestId ?? null,
     loadedTurns: turnNavigationItems,
+    revealFoldedTurn: revealTurn,
   })
+
+  /** Remember the reader's offset so revealed rows grow above it, not under it. */
+  const captureReveal = useCallback(() => {
+    const element = scroll.listRef.current
+    if (element !== null) revealMetrics.current = { scrollTop: element.scrollTop, scrollHeight: element.scrollHeight }
+  }, [scroll.listRef])
+
+  const navigateRail = useCallback((item: TurnRailItem) => {
+    // A folded loaded Turn is re-seated by navigation through revealFoldedTurn,
+    // which also covers a Turn that only folds after its history page lands.
+    captureReveal()
+    scroll.navigateToTurn(item)
+  }, [captureReveal, scroll.navigateToTurn])
+  const revealFoldOrPage = useCallback(() => {
+    if (windowPages >= TRANSCRIPT_WINDOW_PAGE_CAP) {
+      scroll.loadEarlier()
+      return
+    }
+    const target = transcriptWindow.fold?.turns.at(-1)
+    if (target === undefined) return
+    // Revealing from the fold row keeps the reader on the content they were
+    // looking at: the older Turns enter above it, so only the offset is fixed.
+    captureReveal()
+    setWindowPages(pages => Math.max(pages, pagesToRevealTurn(transcriptWindow.turns, target)))
+  }, [captureReveal, scroll.loadEarlier, transcriptWindow.fold, transcriptWindow.turns, windowPages])
+  // Rows enter above the retained suffix, so keep the reader's content under the
+  // viewport top instead of letting the new height push it up.
+  useLayoutEffect(() => {
+    const measured = revealMetrics.current
+    const element = scroll.listRef.current
+    if (measured === null || element === null) return
+    revealMetrics.current = null
+    const grown = element.scrollHeight - measured.scrollHeight
+    if (grown > 0) element.scrollTop = measured.scrollTop + grown
+  }, [scroll.listRef, windowPages])
+  useLayoutEffect(() => {
+    if (pendingReveal === null) return
+    if (scroll.revealIntoView(pendingReveal)) {
+      setPendingReveal(null)
+      return
+    }
+    const needed = pagesToRevealTurn(transcriptWindow.turns, pendingReveal)
+    if (needed > windowPages) setWindowPages(needed)
+  }, [pendingReveal, scroll.revealIntoView, transcriptWindow.turns, windowPages])
 
   return (
     <div className={css.frame}>
@@ -316,7 +378,7 @@ export function ChatView({
           items={railItems}
           activeTurn={scroll.activeTurn}
           busyTurn={scroll.busyTurn}
-          onNavigate={scroll.navigateToTurn}
+          onNavigate={navigateRail}
           t={t}
         />
       )}
@@ -340,7 +402,7 @@ export function ChatView({
               <ChatNodeList
                 windowSeats={windowSeats}
                 foldBusy={windowPages >= TRANSCRIPT_WINDOW_PAGE_CAP && loadingOlder}
-                onRevealFold={windowPages >= TRANSCRIPT_WINDOW_PAGE_CAP ? scroll.loadEarlier : revealFold}
+                onRevealFold={revealFoldOrPage}
                 pendingInputs={pendingInputs}
                 lastInputTurn={lastInputTurn}
                 nodeStore={nodeStore}

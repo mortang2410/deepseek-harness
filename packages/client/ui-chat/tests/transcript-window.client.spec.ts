@@ -100,6 +100,21 @@ describe('transcript window projection', () => {
     expect(window.fold).toEqual({ turns: [0, 1, 2, 3], nodeCount: 4 })
   })
 
+  it('folds a Turn-less row with the Turn it follows instead of mounting it', () => {
+    // Real transcripts carry rows with no Turn of their own (tool steps, injected
+    // Context). Treating them as leading rows would keep them mounted outside the
+    // budget, which is the cost this window exists to remove.
+    const order = ['session/sys', 't0/a', 't0/step', 't1/b', 't2/c', 't3/d', 't4/e', 't5/f', 't6/g']
+    const turnOf = (key: string): number | null => key === 'session/sys' || key === 't0/step'
+      ? null
+      : Number(key.slice(1, key.indexOf('/')))
+    const window = projectTranscriptWindow(order, turnOf, 3)
+    expect(window.leading).toEqual(['session/sys'])
+    expect(window.fold).toEqual({ turns: [0, 1, 2, 3], nodeCount: 5 })
+    expect(window.retained).toEqual(['t4/e', 't5/f', 't6/g'])
+    expect(window.fold!.nodeCount + window.retained.length).toBe(order.length - 1)
+  })
+
   it('collapses everything for a zero budget and degrades safely on a bad one', () => {
     expect(project(N + 4).retained.length).toBeGreaterThan(0)
     const { order, turnOf } = orderOf(N + 4)

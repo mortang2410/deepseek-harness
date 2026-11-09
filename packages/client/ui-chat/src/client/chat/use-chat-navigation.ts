@@ -26,6 +26,7 @@ interface TurnJump {
 export class ChatNavigation {
   private jump: TurnJump | null = null
   private settleFrame: number | null = null
+  private onFoldedTurn: ((turn: number) => boolean) | null = null
 
   constructor(
     private readonly viewport: ChatViewport,
@@ -39,6 +40,15 @@ export class ChatNavigation {
    * @param input - history state from the latest committed render.
    */
   setInput(input: ChatNavigationInput): void { this.input = input }
+
+  /**
+   * Install the window owner's reveal hook. A loaded Turn can still be folded
+   * out of the DOM, and only the render budget can bring it back; returning true
+   * means the caller widened the window, so the jump retries on the next commit
+   * instead of landing on a newer Turn.
+   * @param handler - reveal one loaded Turn, or null to disable.
+   */
+  setFoldedHandler(handler: ((turn: number) => boolean) | null): void { this.onFoldedTurn = handler }
 
   /** Cancel navigation when opening a Chat view. */
   reset(): void {
@@ -70,7 +80,11 @@ export class ChatNavigation {
     if (item.anchor.kind === 'loaded') {
       this.cancel()
       const landing = this.viewport.scrollToTurn(item.turn)
-      if (landing === null) return
+      if (landing === null) {
+        // Folded out of the DOM: widen the render window and retry on commit.
+        this.onFoldedTurn?.(item.turn)
+        return
+      }
       this.reading.acceptNavigation(landing)
       if (this.input.loadingOlder) this.viewport.beginPreserving(landing.position)
       return
@@ -142,6 +156,13 @@ export class ChatNavigation {
       jump.repageHead = this.input.firstSeq
       this.viewport.beginPreserving()
       this.request(jump)
+      return
+    }
+    if (this.onFoldedTurn?.(jump.turn) === true) {
+      // The Turn is loaded but folded; the window is widening, so keep the jump
+      // pending and land it on the commit that seats the Turn.
+      jump.phase = 'settled'
+      jump.landing = 'pending'
       return
     }
     const fallback = this.viewport.scrollToTurnAtOrAfter(jump.turn)
