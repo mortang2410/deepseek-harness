@@ -161,6 +161,21 @@ a copy of a real session: mounted seats plateau at 765 while the fold row's Turn
 count grows 3, 7, 10, 11, 13, 14 and 15 as older pages load, and a rail jump to
 folded Turn 156 lands at Turn 155/156 instead of Turn 162.
 
+### Serving the live GUI
+
+The host's unit, `~/.config/systemd/user/dsh-web.service`, owns its start line,
+so `start.sh` starts that unit and `lib.sh`'s `DSH_BIN` never applies. Its
+`ExecStart` therefore names `/home/wilder/.local/bin/dsh-fork-local` directly; a
+backup of the published-build line sits beside it as
+`dsh-web.service.bak-before-fork`.
+
+Measured on port 3080 with the real profile and a real Session after that
+restart: five Turns stay mounted and the mounted seat count holds at 65 while
+the fold row's Turn count grows 2, 6, 6, 6, 7, 8, 9, 9, 9 across eight "load
+earlier" presses; clicking the fold row seats more Turns (folds 9 to 4, seats 65
+to 116) without moving the reader's top Turn; a rail jump to Turn 160 lands on
+Turn 160 instead of a newer Turn.
+
 ## Updating from upstream
 
 1. `git fetch upstream && git rebase upstream/master` on `local/transcript-window`.
