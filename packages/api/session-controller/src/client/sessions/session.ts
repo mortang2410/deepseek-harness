@@ -56,6 +56,32 @@ const HISTORY_PAGE_OPTIONS = { maxMessages: 500, turnWindow: { minMessages: PAGE
 /** Minimum messages per page while a turn jump loops backwards. */
 export const JUMP_PAGE_MESSAGES = 200
 
+/**
+ * Retained Client window size, in entries, that drops the oldest turns.
+ *
+ * Assembled conversation nodes cost tens of bytes per character of retained
+ * transcript text, so an unbounded live tail is what grows a long-lived page
+ * into gigabytes. The opening page stays below this bound; anything older
+ * remains on the Host behind the fold row and pages back in on demand.
+ */
+export const RETAINED_WINDOW_ENTRIES = 2600
+
+/** Newest turns kept when the retained window is trimmed. */
+export const RETAINED_WINDOW_TURNS = 10
+
+/**
+ * Apply the retained-window budget to one Session event feed.
+ * @param feed - mutable Client event window of one Session.
+ * @returns the new first retained seq, or undefined while the window fits.
+ */
+export function retainSessionWindow(feed: {
+  readonly length: number
+  retainTurns(keep: number): number | undefined
+}): number | undefined {
+  if (feed.length <= RETAINED_WINDOW_ENTRIES) return undefined
+  return feed.retainTurns(RETAINED_WINDOW_TURNS)
+}
+
 const JUMP_PAGE_OPTIONS = {
   ...HISTORY_PAGE_OPTIONS,
   turnWindow: { ...HISTORY_PAGE_OPTIONS.turnWindow, minMessages: JUMP_PAGE_MESSAGES },
@@ -472,7 +498,12 @@ export class Session implements SessionFace {
         this.pendingHistory = null
         this.loadingOlder = false
         if (generation === this.openGeneration && pending.pages.length > 0) {
-          this.prependWindow(pending.pages.reverse().flat(), pending.hasMore)
+          // A retainWindow during the jump moves the base past pages it already
+          // flattened in; dropping those keeps the merged window contiguous
+          // instead of prepending history the trim just released.
+          const base = this.baseSeq
+          const merged = pending.pages.reverse().flat().filter(entry => entry.event.seq >= base)
+          if (merged.length > 0) this.prependWindow(merged, pending.hasMore)
         }
         this.notifier.markDirty()
       }
@@ -753,11 +784,26 @@ export class Session implements SessionFace {
     const awaitingFirstTurn = this.firstPromptPendingTurn
     if (event.type === 'turn/start') this.firstPromptPendingTurn = false
     this.eventSource.append(entry)
+    this.retainWindow()
     // After the feed append: the conversation assembly's animation frame is
     // registered by the feed subscribers above, so the echo-retirement frame
     // scheduled here always runs after the durable node became renderable.
     this.observeSubmissionEvent(event)
     return awaitingFirstTurn !== this.firstPromptPendingTurn
+  }
+
+  /**
+   * Drop retained history past the Client window budget once the live tail
+   * overgrows it. The cut lands on a turn boundary and republishes the window,
+   * so assembled nodes for the dropped turns stop being retained while the
+   * Host keeps them reachable behind the fold row.
+   */
+  private retainWindow(): void {
+    const firstSeq = retainSessionWindow(this.eventSource)
+    if (firstSeq === undefined) return
+    this.baseSeq = SessionLogOffset(firstSeq)
+    this.hasMore = true
+    this.notifier.markDirty()
   }
 
   /** Observe durable acceptance even when insertion and claim share one projection notification. */

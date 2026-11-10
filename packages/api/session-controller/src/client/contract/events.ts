@@ -160,6 +160,39 @@ export class MutableSessionEventSource implements SessionEventSource {
     this.publish(hasMore, { kind: 'prepend', entries })
   }
 
+  /** @returns retained entry count of the current window. */
+  get length(): number { return this.window.length }
+
+  /**
+   * Drop retained history older than the newest `keep` turns.
+   *
+   * The Host keeps the dropped history, so the window stays pageable: the cut
+   * lands on a `turn/start` boundary that a later prepend can reach behind.
+   * @param keep - newest turn starts retained, counting the open turn.
+   * @returns new first retained seq, or undefined when nothing was dropped.
+   */
+  retainTurns(keep: number): number | undefined {
+    if (!Number.isInteger(keep) || keep < 1) {
+      throw new Error('retainTurns: keep must be a positive turn count')
+    }
+    const entries = materialize(this.window)
+    let retainedFrom = -1
+    let seen = 0
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const candidate = entries[index]
+      if (candidate === undefined || candidate.event.type !== 'turn/start') continue
+      seen += 1
+      if (seen === keep) {
+        retainedFrom = index
+        break
+      }
+    }
+    if (retainedFrom <= 0) return undefined
+    const retained = entries.slice(retainedFrom)
+    this.replace(retained, true)
+    return retained[0]?.event.seq
+  }
+
   /**
    * Append one contiguous live entry.
    * @param entry - live tail entry.
