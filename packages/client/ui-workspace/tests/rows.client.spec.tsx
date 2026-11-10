@@ -83,6 +83,36 @@ function fireDrag(row: HTMLElement, kind: 'dragOver' | 'drop', clientY: number):
 }
 
 describe('workspace browser rows', () => {
+  it('does not re-render a row whose presentation survives a re-projection', () => {
+    const node: SessionNode = {
+      id: sid('stable'), title: 'Stable Session', blank: false, running: false,
+      runningSubagentCount: 0, completed: false, updatedAt: 1_000, pinned: false, archived: false,
+    }
+    const onOpen = vi.fn()
+    const onRenameRequest = vi.fn()
+    const renderSlot = vi.fn((): null => null)
+    const view = render(
+      <SessionNodeItem node={node} currentId={undefined} now={61_000} onOpen={onOpen}
+        onRenameRequest={onRenameRequest} t={t} renderSlot={renderSlot} />,
+    )
+    const rendered = renderSlot.mock.calls.length
+    // The list re-projects on every Session activity: a fresh node object with the
+    // same values and a clock that advanced inside the same age bucket must not
+    // re-render 800 sibling rows.
+    view.rerender(
+      <SessionNodeItem node={{ ...node }} currentId={undefined} now={61_500} onOpen={onOpen}
+        onRenameRequest={onRenameRequest} t={t} renderSlot={renderSlot} />,
+    )
+    expect(renderSlot).toHaveBeenCalledTimes(rendered)
+    // A value the row presents still reaches the DOM.
+    view.rerender(
+      <SessionNodeItem node={{ ...node, running: true }} currentId={undefined} now={61_500}
+        onOpen={onOpen} onRenameRequest={onRenameRequest} t={t} renderSlot={renderSlot} />,
+    )
+    expect(renderSlot.mock.calls.length).toBeGreaterThan(rendered)
+    expect(screen.getByText('Stable Session').previousElementSibling?.querySelector('[data-state="ongoing"]')).toBeTruthy()
+  })
+
   it('keeps the leading status cell in the hierarchy-free flat list', () => {
     const idle: SessionNode = {
       id: sid('flat'), title: 'Flat Session', blank: false, running: false,

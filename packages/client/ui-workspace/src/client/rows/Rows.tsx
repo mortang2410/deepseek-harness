@@ -10,7 +10,7 @@
  * context; this package's own actions are entries like any plugin's. The
  * session and workspace hover cards are suppressed while a menu is open.
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import clsx from 'clsx'
 import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
@@ -541,7 +541,7 @@ export function SearchResultItem({ result, currentId, onOpen, onUnarchive, t }: 
  * @param props.t - the browser root's locale seat.
  * @returns the session row.
  */
-export function SessionNodeItem({
+function SessionNodeItemInner({
   node, currentId, now, onOpen, onRenameRequest, renderSlot, onReveal, drag, t,
 }: {
   node: SessionNode
@@ -701,3 +701,48 @@ export function SessionNodeItem({
     />
   )
 }
+
+type SessionNodeItemProps = Parameters<typeof SessionNodeItemInner>[0]
+
+/** Whether two node snapshots present the same row text, status and selection. */
+function sameRowNode(a: SessionNode, b: SessionNode): boolean {
+  return a === b || (a.id === b.id
+    && a.title === b.title
+    && a.blank === b.blank
+    && a.running === b.running
+    && a.runningSubagentCount === b.runningSubagentCount
+    && a.completed === b.completed
+    && a.pinned === b.pinned
+    && a.archived === b.archived
+    && a.updatedAt === b.updatedAt
+    && a.pendingInteraction === b.pendingInteraction)
+}
+
+/**
+ * Skip a row when the Session list re-projects without changing this row.
+ *
+ * `now` only drives the relative age label, so compare that label's own bucket
+ * instead of the raw clock: a clock that advanced inside one bucket must not
+ * invalidate every row. Drag callbacks close over state this row cannot
+ * observe, so their identity matters only while a drag is in flight.
+ */
+function sameRowProps(prev: SessionNodeItemProps, next: SessionNodeItemProps): boolean {
+  if (!sameRowNode(prev.node, next.node)) return false
+  if (prev.currentId !== next.currentId || prev.t !== next.t) return false
+  if (prev.renderSlot !== next.renderSlot) return false
+  if (prev.onOpen !== next.onOpen || prev.onRenameRequest !== next.onRenameRequest) return false
+  if (prev.onReveal !== next.onReveal) return false
+  const before = relativeTime(prev.node.updatedAt, prev.now)
+  const after = relativeTime(next.node.updatedAt, next.now)
+  if (before.unit !== after.unit || before.n !== after.n) return false
+  const a = prev.drag
+  const b = next.drag
+  if (a !== b) {
+    if (a === undefined || b === undefined) return false
+    if (a.active !== b.active || a.marker !== b.marker) return false
+  }
+  return true
+}
+
+/** Session row memoized on the values it presents, not on projection identity. */
+export const SessionNodeItem = memo(SessionNodeItemInner, sameRowProps)

@@ -14,7 +14,7 @@
  * are slot entries with their own behavior, so this component threads no
  * action callbacks and hosts no action surface.
  */
-import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
+import { type CSSProperties, type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import {
   Button, IconArchiveCheckOutlineRegular, IconArchiveOffOutlineRegular, IconArchiveOutlineRegular,
@@ -100,6 +100,21 @@ function useNativeDragAcceptance(active: boolean): void {
       document.removeEventListener('drop', acceptDrop)
     }
   }, [active])
+}
+
+/**
+ * Hold a callback at a stable identity while it always calls the latest prop.
+ *
+ * Session rows are memoized on the values they present, so a callback that the
+ * sidebar re-creates on every render would re-render every row; the ref keeps
+ * the row's props stable without freezing behavior at mount time.
+ */
+function useStableCallback<Args extends readonly unknown[]>(
+  callback: (...args: Args) => void,
+): (...args: Args) => void {
+  const latest = useRef(callback)
+  useLayoutEffect(() => { latest.current = callback })
+  return useMemo(() => (...args: Args) => { latest.current(...args) }, [])
 }
 
 /** Grouping, ordering, and archived-filter menu; own open state so it resets with the wide chrome. */
@@ -289,6 +304,8 @@ function SessionTree({
   setSessionOrder, home, t,
   revealSessionId, onSessionRevealed, shortcuts,
 }: SessionTreeProps) {
+  const openStable = useStableCallback(open)
+  const renameStable = useStableCallback(onSessionRenameRequest)
   const panelActive = usePanelInfo(info => info.activePanelId !== null)
   const statuses = useSessionStatus(s => s)
   const current = panelActive
@@ -300,6 +317,8 @@ function SessionTree({
   const [sessionLimits, setSessionLimits] = useState<Readonly<Record<string, number>>>({})
   // Transient drag marker state; the selected mode owns the resulting order.
   const [drag, setDrag] = useState<DragState | null>(null)
+  const dragRef = useRef(drag)
+  useLayoutEffect(() => { dragRef.current = drag })
   const sessionDropCommitted = useRef(false)
   const [workspaceDrag, setWorkspaceDrag] = useState<WorkspaceDragState | null>(null)
   const workspaceDropCommitted = useRef(false)
@@ -551,12 +570,14 @@ function SessionTree({
               }))
             },
             drop: (half: 'before' | 'after') => {
-            /* v8 ignore next -- narrowing guard: Rows gates drop on `active`, which is false while the drag state is null. */
-              if (drag === null) return
-              commitSessionDrag(drag, { id: node.id, half: normalizeHalf(half) })
+              const current = dragRef.current
+              /* v8 ignore next -- narrowing guard: Rows gates drop on `active`, which is false while the drag state is null. */
+              if (current === null) return
+              commitSessionDrag(current, { id: node.id, half: normalizeHalf(half) })
             },
             end: () => {
-              if (drag?.over !== null && drag?.over !== undefined) commitSessionDrag(drag, drag.over)
+              const current = dragRef.current
+              if (current?.over !== null && current?.over !== undefined) commitSessionDrag(current, current.over)
               else setDrag(null)
               sessionDropCommitted.current = false
             },
@@ -567,8 +588,8 @@ function SessionTree({
               node={node}
               currentId={current}
               now={now}
-              onOpen={open}
-              onRenameRequest={onSessionRenameRequest}
+              onOpen={openStable}
+              onRenameRequest={renameStable}
               renderSlot={renderSlot}
               onReveal={node.id === revealSessionId && group.key === revealGroup
                 ? () => { onSessionRevealed(node.id) }
@@ -649,6 +670,8 @@ function FlatList({
   list: SessionListState
   sessionIds: readonly SessionId[]
 }) {
+  const openStable = useStableCallback(open)
+  const renameStable = useStableCallback(onSessionRenameRequest)
   const panelActive = usePanelInfo(info => info.activePanelId !== null)
   const statuses = useSessionStatus(s => s)
   const rows = useMemo(
@@ -656,6 +679,8 @@ function FlatList({
     [list, sessionIds, rowState, statuses],
   )
   const [drag, setDrag] = useState<DragState | null>(null)
+  const dragRef = useRef(drag)
+  useLayoutEffect(() => { dragRef.current = drag })
   const dropCommitted = useRef(false)
   useNativeDragAcceptance(drag !== null)
   const currentId = panelActive
@@ -691,8 +716,8 @@ function FlatList({
               node={node}
               currentId={currentId}
               now={now}
-              onOpen={open}
-              onRenameRequest={onSessionRenameRequest}
+              onOpen={openStable}
+              onRenameRequest={renameStable}
               renderSlot={renderSlot}
               onReveal={node.id === revealSessionId
                 ? () => { onSessionRevealed(node.id) }
@@ -710,10 +735,12 @@ function FlatList({
                   })
                 },
                 drop: (half) => {
-                  if (drag !== null) commitDrag(drag, { id: node.id, half: normalizeHalf(half) })
+                  const current = dragRef.current
+                  if (current !== null) commitDrag(current, { id: node.id, half: normalizeHalf(half) })
                 },
                 end: () => {
-                  if (drag?.over !== null && drag?.over !== undefined) commitDrag(drag, drag.over)
+                  const current = dragRef.current
+                  if (current?.over !== null && current?.over !== undefined) commitDrag(current, current.over)
                   else setDrag(null)
                   dropCommitted.current = false
                 },
@@ -760,6 +787,7 @@ function SearchResults({
   remote: RemoteSearchState
   resultLimit: number
 }) {
+  const openStable = useStableCallback(open)
   const panelActive = usePanelInfo(info => info.activePanelId !== null)
   const list = useSessions(s => s)
   const statuses = useSessionStatus(s => s)
@@ -793,7 +821,7 @@ function SearchResults({
               key={result.id}
               result={result}
               currentId={currentId}
-              onOpen={open}
+              onOpen={openStable}
               onUnarchive={onUnarchive}
               t={t}
             />
