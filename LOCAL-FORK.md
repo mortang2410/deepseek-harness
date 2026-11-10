@@ -176,6 +176,18 @@ earlier" presses; clicking the fold row seats more Turns (folds 9 to 4, seats 65
 to 116) without moving the reader's top Turn; a rail jump to Turn 160 lands on
 Turn 160 instead of a newer Turn.
 
+Measured again in the user's own Safari on 10 November with the same build and
+a live Session: a first "load earlier" press brought the loaded Turns to five
+(250 to 254) with no fold, the second raised the fold row to 2 Turns while those
+five stayed mounted, and three more presses on another Session held the flow at
+51 to 52 rows while the folded count grew 1, 3, 4. Clicking the fold row there
+raised the mounted set from five Turns to nine (95 to 103), removed the fold row
+because the raised budget covered every loaded Turn, and left the reader's top
+Turn at 103; those same nine Turns fully seated measure 292 rows, against 52
+under the window. The handler also serves `cache-control: no-cache` on
+`/assets/*.js`, so a truncated asset cannot be cached forever.
+
+
 ## Updating from upstream
 
 1. `git fetch upstream && git rebase upstream/master` on `local/transcript-window`.
