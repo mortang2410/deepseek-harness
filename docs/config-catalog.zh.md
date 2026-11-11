@@ -455,6 +455,12 @@ export interface ConnectionConfig {
   trustedHosts?: string[]
   /** Absolute browser-session lifetime in days. Default: 30. */
   cookieMaxAgeDays?: number
+  /**
+   * Keep one launch token in the credential store instead of minting a fresh
+   * one per process, so a bookmarked `?token=` login URL still authenticates
+   * after a restart. Default: false, which rotates the token every boot.
+   */
+  persistLaunchToken?: boolean
   /** Maximum buffered JSON body for every `/api` request. Default: 300 MiB. */
   maxRequestBodyBytes?: number
 }

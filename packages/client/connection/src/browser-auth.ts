@@ -164,23 +164,32 @@ function decodeCookie(value: string, secret: Buffer): BrowserCookiePayload | und
   return decoded as unknown as BrowserCookiePayload
 }
 
-async function initializeSecret(credentials: CredentialProvider): Promise<Buffer> {
+/** Loaded signing secret plus whether this activation created it. */
+interface InitializedSecret {
+  readonly secret: Buffer
+  /** True when the record was absent, which revokes every session issued before it. */
+  readonly created: boolean
+}
+
+async function initializeSecret(credentials: CredentialProvider): Promise<InitializedSecret> {
   const generated: StoredSecretPayload = {
     version: STORED_SECRET_VERSION,
     secret: encodeBase64Url(randomBytes(SECRET_BYTES)),
   }
+  let created = false
   const record = await credentials.modifyRecord(AUTH_RECORD_KEY, (current) => {
     if (current !== undefined) {
       storedSecret(current)
       return Promise.resolve(undefined)
     }
+    created = true
     return Promise.resolve({ kind: 'grant', payload: generated })
   })
   const secret = storedSecret(record)
   if (secret === undefined) {
     throw new Error('client-connection: browser-session credential record was not created')
   }
-  return secret
+  return { secret, created }
 }
 
 function storedLaunchToken(record: CredentialRecord | undefined): string | undefined {
@@ -196,13 +205,20 @@ function storedLaunchToken(record: CredentialRecord | undefined): string | undef
   return token as string
 }
 
-async function initializeLaunchToken(credentials: CredentialProvider): Promise<string> {
+/**
+ * Load or create the durable launch token.
+ * @param credentials - persistent credential provider for the Web profile.
+ * @param rotate - replace the stored token instead of reusing it, so deleting the
+ * signing secret also revokes every URL minted under it.
+ * @returns the token this activation accepts.
+ */
+async function initializeLaunchToken(credentials: CredentialProvider, rotate: boolean): Promise<string> {
   const generated: StoredLaunchTokenPayload = {
     version: STORED_SECRET_VERSION,
     token: encodeBase64Url(randomBytes(SECRET_BYTES)),
   }
   const record = await credentials.modifyRecord(LAUNCH_TOKEN_RECORD_KEY, (current) => {
-    if (current !== undefined) {
+    if (current !== undefined && !rotate) {
       storedLaunchToken(current)
       return Promise.resolve(undefined)
     }
@@ -218,7 +234,8 @@ async function initializeLaunchToken(credentials: CredentialProvider): Promise<s
 /**
  * Process launch-token exchange and persistent signed-cookie verification.
  * Connection loads the credential provider's signing secret during activation
- * and retains it for synchronous request authentication.
+ * and retains it for synchronous request authentication. The launch token is
+ * per-process unless `persistLaunchToken` asks for the stored one.
  */
 export class BrowserAuth {
   private readonly maxAgeMilliseconds: number
@@ -243,7 +260,8 @@ export class BrowserAuth {
    * @param maxAgeDays - positive absolute browser-cookie lifetime in days.
    * @param persistLaunchToken - keep the launch token in the credential store so a
    * bookmarked login URL authenticates again after a restart; default keeps the
-   * per-process token.
+   * per-process token. Deleting the signing-secret record rotates the stored
+   * token too, so revocation still kills every URL issued under the old secret.
    * @returns initialized authentication owner with its launch token.
    */
   static async create(
@@ -252,15 +270,15 @@ export class BrowserAuth {
     maxAgeDays: number,
     persistLaunchToken = false,
   ): Promise<BrowserAuth> {
-    const secret = await initializeSecret(credentials)
+    const { secret, created } = await initializeSecret(credentials)
     const launchToken = persistLaunchToken
-      ? await initializeLaunchToken(credentials)
+      ? await initializeLaunchToken(credentials, created)
       : processLaunchToken(processOwner)
     return new BrowserAuth(launchToken, secret, maxAgeDays)
   }
 
   /**
-   * Add this process's launch token to the caller's application URL.
+   * Add this activation's launch token to the caller's application URL.
    * @param baseUrl - clean browser URL whose authority and mount are preserved.
    * @returns the same URL carrying the process token as its sole authentication input.
    */

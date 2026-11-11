@@ -174,7 +174,34 @@ describe('BrowserAuth', () => {
     expect(token(restarted)).toBe(token(first))
     const login = exchange(first)
     expect(restarted.isAuthenticated(request('/', '127.0.0.1:3080', { cookie: login.cookie }))).toBe(true)
+    // The bookmarked URL itself still redeems after the restart, not only the cookie.
+    expect(exchange(restarted).state.status).toBe(303)
     expect(store.records.size).toBe(2)
+  })
+
+  it('rotates the persisted launch token when the signing secret is reset', async () => {
+    const store = new KeyedCredentials()
+    const provider = store as unknown as CredentialProvider
+    const first = await BrowserAuth.create({}, provider, 30, true)
+    const before = new URL(first.authenticatedUrl('http://127.0.0.1:3080')).searchParams.get('token')
+    for (const key of [...store.records.keys()]) {
+      if (key.includes('browser-session')) store.records.delete(key)
+    }
+    const revoked = await BrowserAuth.create({}, provider, 30, true)
+    expect(new URL(revoked.authenticatedUrl('http://127.0.0.1:3080')).searchParams.get('token'))
+      .not.toBe(before)
+  })
+
+  it('rejects a malformed persisted launch token instead of replacing it', async () => {
+    const store = new KeyedCredentials()
+    const provider = store as unknown as CredentialProvider
+    await BrowserAuth.create({}, provider, 30, true)
+    for (const key of [...store.records.keys()]) {
+      if (key.includes('browser-launch-token')) {
+        store.records.set(key, { kind: 'grant', payload: { version: 1, token: 'short' } })
+      }
+    }
+    await expect(BrowserAuth.create({}, provider, 30, true)).rejects.toThrow(/invalid token/u)
   })
 
   it('preserves the caller authority and mount while adding only this process token', async () => {
