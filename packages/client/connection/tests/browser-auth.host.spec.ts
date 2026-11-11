@@ -62,6 +62,8 @@ function createAuth(
 /** Credential double keeping one record per key, for the durable-token path. */
 class KeyedCredentials {
   readonly records = new Map<string, CredentialRecord>()
+  /** Substring of a key whose writes must fail, standing in for a crash mid-rotation. */
+  failKey: string | undefined
 
   readRecord(key: unknown): Promise<CredentialRecord | undefined> {
     return Promise.resolve(this.records.get(String(key)))
@@ -72,6 +74,9 @@ class KeyedCredentials {
     mutate: (current: CredentialRecord | undefined) => Promise<CredentialRecord | undefined>,
   ): Promise<CredentialRecord | undefined> {
     const name = String(key)
+    if (this.failKey !== undefined && name.includes(this.failKey)) {
+      throw new Error(`credential write failed for ${name}`)
+    }
     const next = await mutate(this.records.get(name))
     if (next !== undefined) this.records.set(name, next)
     return this.records.get(name)
@@ -202,6 +207,24 @@ describe('BrowserAuth', () => {
       }
     }
     await expect(BrowserAuth.create({}, provider, 30, true)).rejects.toThrow(/invalid token/u)
+  })
+
+  it('completes revocation when the token write fails after the secret reset', async () => {
+    const store = new KeyedCredentials()
+    const provider = store as unknown as CredentialProvider
+    const first = await BrowserAuth.create({}, provider, 30, true)
+    const before = new URL(first.authenticatedUrl('http://127.0.0.1:3080')).searchParams.get('token')
+    for (const key of [...store.records.keys()]) {
+      if (key.includes('browser-session')) store.records.delete(key)
+    }
+    // The secret write lands, the token write does not: the next activation must
+    // still notice the generation changed and finish the rotation.
+    store.failKey = 'browser-launch-token'
+    await expect(BrowserAuth.create({}, provider, 30, true)).rejects.toThrow(/credential write failed/u)
+    store.failKey = undefined
+    const recovered = await BrowserAuth.create({}, provider, 30, true)
+    expect(new URL(recovered.authenticatedUrl('http://127.0.0.1:3080')).searchParams.get('token'))
+      .not.toBe(before)
   })
 
   it('preserves the caller authority and mount while adding only this process token', async () => {

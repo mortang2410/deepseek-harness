@@ -28,6 +28,7 @@ interface StoredSecretPayload {
 interface StoredLaunchTokenPayload {
   readonly version: typeof STORED_SECRET_VERSION
   readonly token: string
+  readonly secretFingerprint: string
 }
 
 interface BrowserCookiePayload {
@@ -164,35 +165,33 @@ function decodeCookie(value: string, secret: Buffer): BrowserCookiePayload | und
   return decoded as unknown as BrowserCookiePayload
 }
 
-/** Loaded signing secret plus whether this activation created it. */
-interface InitializedSecret {
-  readonly secret: Buffer
-  /** True when the record was absent, which revokes every session issued before it. */
-  readonly created: boolean
-}
-
-async function initializeSecret(credentials: CredentialProvider): Promise<InitializedSecret> {
+async function initializeSecret(credentials: CredentialProvider): Promise<Buffer> {
   const generated: StoredSecretPayload = {
     version: STORED_SECRET_VERSION,
     secret: encodeBase64Url(randomBytes(SECRET_BYTES)),
   }
-  let created = false
   const record = await credentials.modifyRecord(AUTH_RECORD_KEY, (current) => {
     if (current !== undefined) {
       storedSecret(current)
       return Promise.resolve(undefined)
     }
-    created = true
     return Promise.resolve({ kind: 'grant', payload: generated })
   })
   const secret = storedSecret(record)
   if (secret === undefined) {
     throw new Error('client-connection: browser-session credential record was not created')
   }
-  return { secret, created }
+  return secret
 }
 
-function storedLaunchToken(record: CredentialRecord | undefined): string | undefined {
+/** The launch-token record's reusable fields, or `undefined` when absent. */
+interface StoredLaunchToken {
+  readonly token: string
+  /** Fingerprint of the signing secret this token was minted under, when recorded. */
+  readonly secretFingerprint: string | undefined
+}
+
+function storedLaunchToken(record: CredentialRecord | undefined): StoredLaunchToken | undefined {
   if (record === undefined) return undefined
   if (record.kind !== 'grant' || !isRecord(record.payload)
     || record.payload.version !== STORED_SECRET_VERSION) {
@@ -202,33 +201,44 @@ function storedLaunchToken(record: CredentialRecord | undefined): string | undef
   if (canonicalSecret(token) === undefined) {
     throw new Error('client-connection: browser-launch-token credential record has an invalid token')
   }
-  return token as string
+  const secretFingerprint = record.payload.secretFingerprint
+  return {
+    token: token as string,
+    secretFingerprint: typeof secretFingerprint === 'string' ? secretFingerprint : undefined,
+  }
+}
+
+/** Stable fingerprint binding a stored launch token to one signing-secret generation. */
+function secretFingerprint(secret: Buffer): string {
+  return encodeBase64Url(createHash('sha256').update(secret).digest())
 }
 
 /**
  * Load or create the durable launch token.
  * @param credentials - persistent credential provider for the Web profile.
- * @param rotate - replace the stored token instead of reusing it, so deleting the
- * signing secret also revokes every URL minted under it.
+ * @param fingerprint - fingerprint of the active signing secret; a stored token
+ * minted under another generation is replaced, so deleting the secret revokes
+ * every URL even when a previous activation stopped between the two writes.
  * @returns the token this activation accepts.
  */
-async function initializeLaunchToken(credentials: CredentialProvider, rotate: boolean): Promise<string> {
+async function initializeLaunchToken(credentials: CredentialProvider, fingerprint: string): Promise<string> {
   const generated: StoredLaunchTokenPayload = {
     version: STORED_SECRET_VERSION,
     token: encodeBase64Url(randomBytes(SECRET_BYTES)),
+    secretFingerprint: fingerprint,
   }
   const record = await credentials.modifyRecord(LAUNCH_TOKEN_RECORD_KEY, (current) => {
-    if (current !== undefined && !rotate) {
-      storedLaunchToken(current)
+    const stored = storedLaunchToken(current)
+    if (stored !== undefined && stored.secretFingerprint === fingerprint) {
       return Promise.resolve(undefined)
     }
     return Promise.resolve({ kind: 'grant', payload: generated })
   })
-  const token = storedLaunchToken(record)
-  if (token === undefined) {
+  const stored = storedLaunchToken(record)
+  if (stored === undefined) {
     throw new Error('client-connection: browser-launch-token credential record was not created')
   }
-  return token
+  return stored.token
 }
 
 /**
@@ -270,9 +280,9 @@ export class BrowserAuth {
     maxAgeDays: number,
     persistLaunchToken = false,
   ): Promise<BrowserAuth> {
-    const { secret, created } = await initializeSecret(credentials)
+    const secret = await initializeSecret(credentials)
     const launchToken = persistLaunchToken
-      ? await initializeLaunchToken(credentials, created)
+      ? await initializeLaunchToken(credentials, secretFingerprint(secret))
       : processLaunchToken(processOwner)
     return new BrowserAuth(launchToken, secret, maxAgeDays)
   }
