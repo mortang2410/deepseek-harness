@@ -10,6 +10,7 @@ import type {
 } from './rpc.ts'
 
 const AUTH_RECORD_KEY = credentialKey('client-connection', 'browser-session')
+const LAUNCH_TOKEN_RECORD_KEY = credentialKey('client-connection', 'browser-launch-token')
 const DAY_MILLISECONDS = 24 * 60 * 60 * 1000
 const SECRET_BYTES = 32
 const TOKEN_QUERY = 'token'
@@ -22,6 +23,11 @@ const PROCESS_LAUNCH_TOKENS = new WeakMap<object, string>()
 interface StoredSecretPayload {
   readonly version: typeof STORED_SECRET_VERSION
   readonly secret: string
+}
+
+interface StoredLaunchTokenPayload {
+  readonly version: typeof STORED_SECRET_VERSION
+  readonly token: string
 }
 
 interface BrowserCookiePayload {
@@ -177,21 +183,51 @@ async function initializeSecret(credentials: CredentialProvider): Promise<Buffer
   return secret
 }
 
+function storedLaunchToken(record: CredentialRecord | undefined): string | undefined {
+  if (record === undefined) return undefined
+  if (record.kind !== 'grant' || !isRecord(record.payload)
+    || record.payload.version !== STORED_SECRET_VERSION) {
+    throw new Error('client-connection: browser-launch-token credential record has an unsupported format')
+  }
+  const token = record.payload.token
+  if (canonicalSecret(token) === undefined) {
+    throw new Error('client-connection: browser-launch-token credential record has an invalid token')
+  }
+  return token as string
+}
+
+async function initializeLaunchToken(credentials: CredentialProvider): Promise<string> {
+  const generated: StoredLaunchTokenPayload = {
+    version: STORED_SECRET_VERSION,
+    token: encodeBase64Url(randomBytes(SECRET_BYTES)),
+  }
+  const record = await credentials.modifyRecord(LAUNCH_TOKEN_RECORD_KEY, (current) => {
+    if (current !== undefined) {
+      storedLaunchToken(current)
+      return Promise.resolve(undefined)
+    }
+    return Promise.resolve({ kind: 'grant', payload: generated })
+  })
+  const token = storedLaunchToken(record)
+  if (token === undefined) {
+    throw new Error('client-connection: browser-launch-token credential record was not created')
+  }
+  return token
+}
+
 /**
  * Process launch-token exchange and persistent signed-cookie verification.
  * Connection loads the credential provider's signing secret during activation
  * and retains it for synchronous request authentication.
  */
 export class BrowserAuth {
-  private readonly launchToken: string
   private readonly maxAgeMilliseconds: number
 
   private constructor(
-    processOwner: object,
+    private readonly launchToken: string,
     private readonly secret: Buffer,
     maxAgeDays: number,
   ) {
-    this.launchToken = processLaunchToken(processOwner)
     this.maxAgeMilliseconds = maxAgeDays * DAY_MILLISECONDS
     if (!Number.isSafeInteger(this.maxAgeMilliseconds)
       || !Number.isSafeInteger(Date.now() + this.maxAgeMilliseconds)) {
@@ -205,14 +241,22 @@ export class BrowserAuth {
    * @param processOwner - root application context retaining one token across Connection reloads.
    * @param credentials - persistent credential provider for the Web profile.
    * @param maxAgeDays - positive absolute browser-cookie lifetime in days.
-   * @returns initialized authentication owner with the process owner's launch token.
+   * @param persistLaunchToken - keep the launch token in the credential store so a
+   * bookmarked login URL authenticates again after a restart; default keeps the
+   * per-process token.
+   * @returns initialized authentication owner with its launch token.
    */
   static async create(
     processOwner: object,
     credentials: CredentialProvider,
     maxAgeDays: number,
+    persistLaunchToken = false,
   ): Promise<BrowserAuth> {
-    return new BrowserAuth(processOwner, await initializeSecret(credentials), maxAgeDays)
+    const secret = await initializeSecret(credentials)
+    const launchToken = persistLaunchToken
+      ? await initializeLaunchToken(credentials)
+      : processLaunchToken(processOwner)
+    return new BrowserAuth(launchToken, secret, maxAgeDays)
   }
 
   /**

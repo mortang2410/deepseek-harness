@@ -2,7 +2,7 @@
 
 import { createHmac } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import type { CredentialProvider, CredentialRecord } from '@deepseek-ai/dsh-credentials'
 import { BrowserAuth } from '../src/browser-auth.ts'
 import type { ConnectionIndexRequest, ConnectionIndexResponse } from '../src/rpc.ts'
 import { RecordCredentials } from './browser-credentials.ts'
@@ -57,6 +57,30 @@ function createAuth(
   processOwner: object = {},
 ): Promise<BrowserAuth> {
   return BrowserAuth.create(processOwner, credentials(store), maxAgeDays)
+}
+
+/** Credential double keeping one record per key, for the durable-token path. */
+class KeyedCredentials {
+  readonly records = new Map<string, CredentialRecord>()
+
+  readRecord(key: unknown): Promise<CredentialRecord | undefined> {
+    return Promise.resolve(this.records.get(String(key)))
+  }
+
+  async modifyRecord(
+    key: unknown,
+    mutate: (current: CredentialRecord | undefined) => Promise<CredentialRecord | undefined>,
+  ): Promise<CredentialRecord | undefined> {
+    const name = String(key)
+    const next = await mutate(this.records.get(name))
+    if (next !== undefined) this.records.set(name, next)
+    return this.records.get(name)
+  }
+
+  deleteRecord(key: unknown): Promise<void> {
+    this.records.delete(String(key))
+    return Promise.resolve()
+  }
 }
 
 function request(url: string, authority = '127.0.0.1:3080', init?: {
@@ -138,6 +162,19 @@ describe('BrowserAuth', () => {
         'referrer-policy': 'no-referrer',
       },
     })
+  })
+
+  it('reuses one persisted launch token across restarts when configured', async () => {
+    const store = new KeyedCredentials()
+    const provider = store as unknown as CredentialProvider
+    const first = await BrowserAuth.create({}, provider, 30, true)
+    const restarted = await BrowserAuth.create({}, provider, 30, true)
+    const token = (auth: BrowserAuth): string | null =>
+      new URL(auth.authenticatedUrl('http://127.0.0.1:3080')).searchParams.get('token')
+    expect(token(restarted)).toBe(token(first))
+    const login = exchange(first)
+    expect(restarted.isAuthenticated(request('/', '127.0.0.1:3080', { cookie: login.cookie }))).toBe(true)
+    expect(store.records.size).toBe(2)
   })
 
   it('preserves the caller authority and mount while adding only this process token', async () => {
