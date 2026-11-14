@@ -12,7 +12,9 @@
  * search field. Provider headings paint their background only while pinned
  * by scrolling. Clearing a query restores the full list and search focus.
  * Selecting restores trigger focus without a ring until the trigger loses focus
- * or the menu reopens. Model names match a case-insensitive ordered subsequence
+ * or the menu reopens. Addressed subagent sessions render the same trigger
+ * disabled over the same directory state, showing the model and reasoning
+ * effort without a menu. Model names match a case-insensitive ordered subsequence
  * within each provider group, ranked by
  * prefix, alignment score, then catalog order. Returning to the root pane
  * hands focus back to the cell that opened it. Data and submission ride the
@@ -237,7 +239,41 @@ export function ModelSelect(
   }, [open, pane, state, query])
   /* jscpd:ignore-end */
 
-  if (!available) return null
+  const waiting = state.current === null && state.status === 'loading'
+  const modelLabel = waiting
+    ? t('trigger.loading')
+    : currentChoice?.model.name
+      ?? (state.current === null ? t('trigger.fallback') : `${state.current.provider}/${state.current.model}`)
+  const triggerLabel = effortLabel === undefined ? modelLabel : `${modelLabel} · ${effortLabel}`
+  const triggerAria = waiting
+    ? t('trigger.loading')
+    : state.current === null
+      ? t('trigger.selectAria')
+      : effortLabel === undefined
+        ? t('trigger.aria', { model: modelLabel })
+        : t('trigger.ariaEffort', { model: modelLabel, effort: effortLabel })
+
+  // Addressed subagent sessions cannot select a model (the Agent-bound RPCs
+  // would activate persisted history outside the direct-parent continuation
+  // path), but their chat still shows which model and reasoning effort the
+  // child runs: a disabled trigger over the same directory state, no menu.
+  if (!available) {
+    return (
+      <div className={css.root}>
+        <button
+          type="button"
+          className={css.trigger}
+          aria-label={triggerLabel}
+          title={triggerLabel}
+          disabled
+        >
+          <IconDataOutlineRegular className={css.triggerIcon} size={16} />
+          <span className={css.triggerLabel}>{modelLabel}</span>
+          {effortLabel !== undefined && <span className={css.triggerEffort}>{effortLabel}</span>}
+        </button>
+      </div>
+    )
+  }
 
   const show = (): void => {
     setSelectionFocus(false)
@@ -411,19 +447,6 @@ export function ModelSelect(
     submit(selection)
   }
 
-  const waiting = state.current === null && state.status === 'loading'
-  const modelLabel = waiting
-    ? t('trigger.loading')
-    : currentChoice?.model.name
-      ?? (state.current === null ? t('trigger.fallback') : `${state.current.provider}/${state.current.model}`)
-  const triggerLabel = effortLabel === undefined ? modelLabel : `${modelLabel} · ${effortLabel}`
-  const triggerAria = waiting
-    ? t('trigger.loading')
-    : state.current === null
-      ? t('trigger.selectAria')
-      : effortLabel === undefined
-        ? t('trigger.aria', { model: modelLabel })
-        : t('trigger.ariaEffort', { model: modelLabel, effort: effortLabel })
   itemRefs.current = []
   let itemIndex = 0
   let modelIndex = 0

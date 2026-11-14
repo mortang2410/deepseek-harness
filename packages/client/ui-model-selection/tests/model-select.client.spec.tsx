@@ -346,19 +346,27 @@ describe('ModelSelect reasoning effort', () => {
     }
   })
 
-  it('renders no Agent-bound control for an addressed subagent session', () => {
+  it('shows the subagent model and effort read-only without an Agent-bound control', () => {
     const load = vi.fn()
+    const select = vi.fn().mockResolvedValue(undefined)
     render(<ModelSelect
       locked={false}
       available={false}
       directory={createSnapshotStore(state())}
       load={load}
-      select={vi.fn().mockResolvedValue(undefined)}
+      select={select}
       t={t}
     />)
 
-    expect(screen.queryByRole('button')).toBeNull()
+    const trigger = screen.getByRole('button', { name: 'DeepSeek-V4-Flash · High' })
+    expect(trigger.textContent).toContain('DeepSeek-V4-Flash')
+    expect(trigger.textContent).toContain('High')
+    expect(trigger.hasAttribute('disabled')).toBe(true)
+    expect(trigger.hasAttribute('aria-haspopup')).toBe(false)
+    fireEvent.click(trigger)
     expect(load).not.toHaveBeenCalled()
+    expect(select).not.toHaveBeenCalled()
+    expect(screen.queryByRole('menu')).toBeNull()
   })
 })
 
